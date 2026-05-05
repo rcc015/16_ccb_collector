@@ -1,0 +1,81 @@
+{
+  "areas": [
+    {
+      "id": "software",
+      "name": "Software",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Software"
+    },
+    {
+      "id": "product",
+      "name": "Product",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Product"
+    },
+    {
+      "id": "quality",
+      "name": "Quality",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Quality"
+    },
+    {
+      "id": "machine",
+      "name": "Machine",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Machine"
+    },
+    {
+      "id": "testing",
+      "name": "Testing",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Testing"
+    },
+    {
+      "id": "infra",
+      "name": "Infra",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Infra"
+    },
+    {
+      "id": "optics",
+      "name": "Optics",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Optics"
+    },
+    {
+      "id": "data",
+      "name": "Data",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Data"
+    },
+    {
+      "id": "research",
+      "name": "Research",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Research"
+    },
+    {
+      "id": "exploration",
+      "name": "Exploration",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Exploration"
+    },
+    {
+      "id": "mecha",
+      "name": "Mecha",
+      "owner": "Pending",
+      "email": "",
+      "sourceColumn": "Mecha"
+    }
+  ]
+}

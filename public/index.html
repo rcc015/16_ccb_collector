@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es" data-base-path="__APP_BASE_PATH__">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CCB Collector</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+  </head>
+  <body>
+    <section id="auth-screen" class="auth-shell">
+      <div class="auth-card">
+        <p class="eyebrow">Conceivable Access</p>
+        <h1>CCB Collector</h1>
+        <p class="hero-copy">
+          Acceso restringido con Google para usuarios `@conceivable.life`.
+        </p>
+        <div id="auth-status" class="meta-line"></div>
+        <div id="google-signin"></div>
+      </div>
+    </section>
+
+    <main id="app-shell" class="app-shell app-hidden">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Change Control Board</p>
+          <h1>CCB Collector</h1>
+          <p class="hero-copy">
+            Controla open items, valida si existe cambio sustancial, identifica areas impactadas, registra votos y prepara el reporte diario para la sesion de CCB.
+          </p>
+        </div>
+        <div>
+          <div id="prerequisite-card" class="status-card"></div>
+          <div class="button-row top-gap">
+            <div id="current-user" class="meta-line"></div>
+            <button id="logout-button" class="secondary">Salir</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel two-column">
+        <div>
+          <div class="section-heading">
+            <h2>Owners por area</h2>
+            <div class="button-row">
+              <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
+              <button id="export-state" class="secondary">Exportar JSON</button>
+            </div>
+          </div>
+          <div id="areas-list" class="chip-list"></div>
+          <form id="area-form" class="stack">
+            <input name="name" placeholder="Nombre del area" required />
+            <input name="owner" placeholder="Owner" required />
+            <input name="email" type="email" placeholder="Email del owner" required />
+            <button type="submit">Agregar area</button>
+          </form>
+        </div>
+
+        <div>
+          <div class="section-heading">
+            <h2>Reporte diario</h2>
+            <button id="copy-report" class="secondary">Copiar resumen</button>
+          </div>
+          <pre id="daily-report" class="report-box"></pre>
+          <p class="meta-line">
+            La sincronizacion actual usa un snapshot local del Google Sheet con la estructura real del archivo.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Live Sync</h2>
+          <div class="button-row">
+            <button id="save-live-sync" class="secondary">Guardar Live Sync</button>
+            <button id="run-live-sync" class="secondary">Sincronizar ahora</button>
+          </div>
+        </div>
+        <div class="grid-form">
+          <label class="checkbox">
+            <input id="live-sync-enabled" type="checkbox" />
+            Activar sincronizacion automatica
+          </label>
+          <select id="live-sync-source-type">
+            <option value="csv">CSV URL</option>
+            <option value="json">JSON URL</option>
+          </select>
+          <input id="live-sync-source-url" placeholder="https://script.google.com/... o URL CSV publicada" />
+          <input id="live-sync-interval-ms" type="number" min="30000" step="30000" placeholder="300000" />
+        </div>
+        <pre id="live-sync-status" class="report-box"></pre>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Importar Open Item List CSV</h2>
+        </div>
+        <p class="meta-line">
+          Exporta la pestaña <strong>Open Item List</strong> de Google Sheets como CSV, cargala aqui y luego la app actualiza el snapshot local y los open items.
+        </p>
+        <div class="button-row">
+          <input id="csv-file-input" type="file" accept=".csv,text/csv" />
+          <button id="import-csv-button" class="secondary">Importar CSV</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Nuevo open item</h2>
+          <button id="save-state" class="secondary">Guardar cambios</button>
+        </div>
+        <form id="open-item-form" class="grid-form">
+          <input name="id" placeholder="ID, ej. OI-003" required />
+          <input name="title" placeholder="Titulo" required />
+          <input name="sourceRef" placeholder="Referencia fuente" />
+          <select name="ownerAreaId" id="owner-area-select" required></select>
+          <select name="status">
+            <option value="open">Open</option>
+            <option value="deferred">Deferred</option>
+            <option value="closed">Closed</option>
+          </select>
+          <label class="checkbox">
+            <input type="checkbox" name="isSubstantial" />
+            Cambio sustancial
+          </label>
+          <textarea name="description" placeholder="Descripcion del open item" rows="3"></textarea>
+          <div>
+            <p class="field-label">Areas impactadas</p>
+            <div id="impacted-areas" class="checkbox-list"></div>
+          </div>
+          <button type="submit">Crear open item</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Open items activos</h2>
+          <button id="load-seed" class="secondary">Restaurar demo</button>
+        </div>
+        <div id="open-items-list" class="card-grid"></div>
+      </section>
+
+      <template id="open-item-template">
+        <article class="open-item-card">
+          <div class="card-top">
+            <div>
+              <p class="item-id"></p>
+              <h3 class="item-title"></h3>
+            </div>
+            <span class="badge"></span>
+          </div>
+          <p class="item-description"></p>
+          <p class="meta-line"></p>
+          <p class="impact-line"></p>
+          <div class="vote-list"></div>
+          <form class="vote-form stack">
+            <select name="areaId"></select>
+            <select name="decision">
+              <option value="approve">Approve</option>
+              <option value="reject">Reject</option>
+              <option value="needs-info">Needs info</option>
+            </select>
+            <input name="comment" placeholder="Comentario del voto" />
+            <button type="submit">Registrar voto</button>
+          </form>
+          <button class="secondary close-item-button" type="button">Marcar closed</button>
+        </article>
+      </template>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+  </html>

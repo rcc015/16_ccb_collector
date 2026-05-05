@@ -1,0 +1,14 @@
+{
+  "name": "ccb-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MVP web para evaluar open items, impacto por area, votacion y agenda CCB.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+    ,
+    "google-auth-library": "^10.4.1"
+  }
+}

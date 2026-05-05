@@ -1,0 +1,62 @@
+{
+  "areas": [
+    {
+      "id": "qa",
+      "name": "Quality Assurance",
+      "owner": "Evelyn Sanchez",
+      "email": "qa.owner@example.com"
+    },
+    {
+      "id": "eng",
+      "name": "Engineering",
+      "owner": "Rodrigo Castro",
+      "email": "engineering.owner@example.com"
+    },
+    {
+      "id": "reg",
+      "name": "Regulatory",
+      "owner": "Eduardo Borda",
+      "email": "regulatory.owner@example.com"
+    }
+  ],
+  "openItems": [
+    {
+      "id": "OI-001",
+      "title": "Actualizar matriz de responsabilidades ITL/PdM",
+      "description": "Revisar la actualizacion de roles y su impacto en el Change Management Plan.",
+      "sourceRef": "SOP-QA-006 v01",
+      "ownerAreaId": "eng",
+      "impactedAreaIds": ["qa", "eng", "reg"],
+      "isSubstantial": true,
+      "status": "open",
+      "createdAt": "2026-04-30T09:00:00.000Z",
+      "votes": [
+        {
+          "areaId": "eng",
+          "decision": "approve",
+          "comment": "Sin impacto tecnico adicional.",
+          "createdAt": "2026-04-30T10:00:00.000Z"
+        },
+        {
+          "areaId": "qa",
+          "decision": "needs-info",
+          "comment": "Falta anexo de entrenamiento.",
+          "createdAt": "2026-04-30T11:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "OI-002",
+      "title": "Confirmar actualizacion de formatos anexos",
+      "description": "Validar si el cambio requiere actualizar formatos operativos relacionados.",
+      "sourceRef": "Open Item List 2026-04-30",
+      "ownerAreaId": "qa",
+      "impactedAreaIds": ["qa"],
+      "isSubstantial": false,
+      "status": "open",
+      "createdAt": "2026-04-30T12:00:00.000Z",
+      "votes": []
+    }
+  ],
+  "lastSavedAt": "2026-04-30T12:00:00.000Z"
+}
