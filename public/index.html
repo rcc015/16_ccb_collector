@@ -38,106 +38,140 @@
         </div>
       </section>
 
-      <section class="panel two-column">
-        <div>
-          <div class="section-heading">
-            <h2>Owners por area</h2>
-            <div class="button-row">
-              <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
-              <button id="export-state" class="secondary">Exportar JSON</button>
+      <section class="tab-shell">
+        <nav class="tab-nav" aria-label="Secciones principales">
+          <button class="tab-button is-active" type="button" data-tab="summary">Resumen</button>
+          <button class="tab-button" type="button" data-tab="items">Open Items</button>
+          <button class="tab-button" type="button" data-tab="sources">Fuentes</button>
+          <button class="tab-button" type="button" data-tab="framework">Marco CCB</button>
+        </nav>
+
+        <section class="tab-panel is-active" data-tab-panel="summary">
+          <section class="panel two-column">
+            <div>
+              <div class="section-heading">
+                <h2>Owners por area</h2>
+                <div class="button-row">
+                  <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
+                  <button id="export-state" class="secondary">Exportar JSON</button>
+                </div>
+              </div>
+              <p class="meta-line">
+                Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong> y luego usa <strong>Guardar cambios</strong>.
+              </p>
+              <div id="areas-list" class="area-editor-list"></div>
             </div>
-          </div>
-          <div id="areas-list" class="chip-list"></div>
-          <form id="area-form" class="stack">
-            <input name="name" placeholder="Nombre del area" required />
-            <input name="owner" placeholder="Owner" required />
-            <input name="email" type="email" placeholder="Email del owner" required />
-            <button type="submit">Agregar area</button>
-          </form>
-        </div>
 
-        <div>
-          <div class="section-heading">
-            <h2>Reporte diario</h2>
-            <button id="copy-report" class="secondary">Copiar resumen</button>
-          </div>
-          <pre id="daily-report" class="report-box"></pre>
-          <p class="meta-line">
-            La sincronizacion actual usa un snapshot local del Google Sheet con la estructura real del archivo.
-          </p>
-        </div>
-      </section>
+            <div>
+              <div class="section-heading">
+                <h2>Reporte diario</h2>
+                <button id="copy-report" class="secondary">Copiar resumen</button>
+              </div>
+              <div id="source-status" class="source-status"></div>
+              <pre id="daily-report" class="report-box"></pre>
+              <p class="meta-line">
+                La app puede trabajar con snapshot local o leer/escribir directo sobre Google Sheets si configuras service account.
+              </p>
+            </div>
+          </section>
+        </section>
 
-      <section class="panel">
-        <div class="section-heading">
-          <h2>Live Sync</h2>
-          <div class="button-row">
-            <button id="save-live-sync" class="secondary">Guardar Live Sync</button>
-            <button id="run-live-sync" class="secondary">Sincronizar ahora</button>
-          </div>
-        </div>
-        <div class="grid-form">
-          <label class="checkbox">
-            <input id="live-sync-enabled" type="checkbox" />
-            Activar sincronizacion automatica
-          </label>
-          <select id="live-sync-source-type">
-            <option value="csv">CSV URL</option>
-            <option value="json">JSON URL</option>
-          </select>
-          <input id="live-sync-source-url" placeholder="https://script.google.com/... o URL CSV publicada" />
-          <input id="live-sync-interval-ms" type="number" min="30000" step="30000" placeholder="300000" />
-        </div>
-        <pre id="live-sync-status" class="report-box"></pre>
-      </section>
+        <section class="tab-panel" data-tab-panel="items">
+          <section class="panel">
+            <div class="section-heading">
+              <h2>Nuevo open item</h2>
+              <div class="button-row">
+                <button id="save-state" class="secondary">Guardar cambios</button>
+                <button id="load-seed" class="secondary">Restaurar demo</button>
+              </div>
+            </div>
+            <form id="open-item-form" class="grid-form">
+              <input name="id" placeholder="ID, ej. OI-003" required />
+              <input name="title" placeholder="Titulo" required />
+              <input name="sourceRef" placeholder="Referencia fuente" />
+              <select name="ownerAreaId" id="owner-area-select" required></select>
+              <select name="status">
+                <option value="open">Open</option>
+                <option value="deferred">Deferred</option>
+                <option value="closed">Closed</option>
+              </select>
+              <label class="checkbox">
+                <input type="checkbox" name="isSubstantial" />
+                Cambio sustancial
+              </label>
+              <textarea name="description" placeholder="Descripcion del open item" rows="3"></textarea>
+              <div>
+                <p class="field-label">Areas impactadas</p>
+                <div id="impacted-areas" class="checkbox-list"></div>
+              </div>
+              <button type="submit">Crear open item</button>
+            </form>
+          </section>
 
-      <section class="panel">
-        <div class="section-heading">
-          <h2>Importar Open Item List CSV</h2>
-        </div>
-        <p class="meta-line">
-          Exporta la pestaña <strong>Open Item List</strong> de Google Sheets como CSV, cargala aqui y luego la app actualiza el snapshot local y los open items.
-        </p>
-        <div class="button-row">
-          <input id="csv-file-input" type="file" accept=".csv,text/csv" />
-          <button id="import-csv-button" class="secondary">Importar CSV</button>
-        </div>
-      </section>
+          <section class="panel">
+            <div class="section-heading">
+              <h2>Open items activos</h2>
+            </div>
+            <div id="open-items-list" class="card-grid"></div>
+          </section>
+        </section>
 
-      <section class="panel">
-        <div class="section-heading">
-          <h2>Nuevo open item</h2>
-          <button id="save-state" class="secondary">Guardar cambios</button>
-        </div>
-        <form id="open-item-form" class="grid-form">
-          <input name="id" placeholder="ID, ej. OI-003" required />
-          <input name="title" placeholder="Titulo" required />
-          <input name="sourceRef" placeholder="Referencia fuente" />
-          <select name="ownerAreaId" id="owner-area-select" required></select>
-          <select name="status">
-            <option value="open">Open</option>
-            <option value="deferred">Deferred</option>
-            <option value="closed">Closed</option>
-          </select>
-          <label class="checkbox">
-            <input type="checkbox" name="isSubstantial" />
-            Cambio sustancial
-          </label>
-          <textarea name="description" placeholder="Descripcion del open item" rows="3"></textarea>
-          <div>
-            <p class="field-label">Areas impactadas</p>
-            <div id="impacted-areas" class="checkbox-list"></div>
-          </div>
-          <button type="submit">Crear open item</button>
-        </form>
-      </section>
+        <section class="tab-panel" data-tab-panel="sources">
+          <section class="panel">
+            <div class="section-heading">
+              <h2>Live Sync</h2>
+              <div class="button-row">
+                <button id="save-live-sync" class="secondary">Guardar Live Sync</button>
+                <button id="run-live-sync" class="secondary">Sincronizar ahora</button>
+              </div>
+            </div>
+            <div class="grid-form">
+              <label class="checkbox">
+                <input id="live-sync-enabled" type="checkbox" />
+                Activar sincronizacion automatica
+              </label>
+              <select id="live-sync-source-type">
+                <option value="csv">CSV URL</option>
+                <option value="json">JSON URL</option>
+                <option value="google-sheets">Google Sheets API</option>
+              </select>
+              <input id="live-sync-source-url" placeholder="https://script.google.com/... o URL CSV publicada" />
+              <input id="live-sync-interval-ms" type="number" min="30000" step="30000" placeholder="300000" />
+            </div>
+            <pre id="live-sync-status" class="report-box"></pre>
+          </section>
 
-      <section class="panel">
-        <div class="section-heading">
-          <h2>Open items activos</h2>
-          <button id="load-seed" class="secondary">Restaurar demo</button>
-        </div>
-        <div id="open-items-list" class="card-grid"></div>
+          <section class="panel">
+            <div class="section-heading">
+              <h2>Importar Open Item List CSV</h2>
+            </div>
+            <p class="meta-line">
+              Exporta la pestaña <strong>Open Item List</strong> de Google Sheets como CSV, cargala aqui y luego la app actualiza el snapshot local y los open items.
+            </p>
+            <div class="button-row">
+              <input id="csv-file-input" type="file" accept=".csv,text/csv" />
+              <button id="import-csv-button" class="secondary">Importar CSV</button>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="framework">
+          <section class="panel two-column">
+            <div>
+              <div class="section-heading">
+                <h2>Guia OIL</h2>
+              </div>
+              <div id="guideline-list" class="reference-list"></div>
+            </div>
+
+            <div>
+              <div class="section-heading">
+                <h2>Decision CCB</h2>
+              </div>
+              <div id="decision-framework" class="reference-list"></div>
+            </div>
+          </section>
+        </section>
       </section>
 
       <template id="open-item-template">

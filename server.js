@@ -3,13 +3,19 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
-const { OAuth2Client } = require("google-auth-library");
+const { JWT, OAuth2Client } = require("google-auth-library");
 require("dotenv").config();
 
 const PORT = process.env.PORT || 3000;
 const BASE_PATH = normalizeBasePath(process.env.BASE_PATH || "");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, "data");
+const SOURCE_SPREADSHEET_ID = process.env.SOURCE_SPREADSHEET_ID || "1G6YNnnIrqEH_oIgq95bXmrER2lUjPYtkCeV5zwaXRms";
+const SOURCE_SHEET_NAME = process.env.SOURCE_SHEET_NAME || "Open Item List";
+const AREAS_SHEET_NAME = process.env.AREAS_SHEET_NAME || "CCB Areas";
+const VOTES_SHEET_NAME = process.env.VOTES_SHEET_NAME || "CCB Votes";
+const GOOGLE_SERVICE_ACCOUNT_KEY_PATH = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || "";
+const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const SEED_FILE = path.join(DATA_DIR, "seed.json");
 const AREA_DIRECTORY_FILE = path.join(DATA_DIR, "area-directory.json");
@@ -17,6 +23,33 @@ const GOOGLE_SNAPSHOT_FILE = path.join(DATA_DIR, "google-open-items-snapshot.jso
 const LIVE_SYNC_CONFIG_FILE = path.join(DATA_DIR, "live-sync-config.json");
 const AUTH_CONFIG_FILE = path.join(DATA_DIR, "auth-config.json");
 const SESSION_COOKIE_NAME = "ccb_session";
+const OPEN_ITEM_HEADERS = [
+  "ID",
+  "Open Item Description",
+  "Owner",
+  "Date Created",
+  "Due Date",
+  "Status",
+  "Comments/Updates",
+  "Software",
+  "Product",
+  "Quality",
+  "Machine",
+  "Testing",
+  "Infra",
+  "Optics",
+  "Data",
+  "Research",
+  "Exploration",
+  "Mecha",
+  "Minutes Related",
+  "Git Repository",
+  "CCB Score",
+  "CCB Status",
+  "Jira Tickets Related",
+];
+const AREA_HEADERS = ["id", "name", "owner", "email", "sourceColumn"];
+const VOTE_HEADERS = ["openItemId", "areaId", "decision", "comment", "createdAt"];
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -130,6 +163,22 @@ function persistState(nextState) {
   return nextState;
 }
 
+async function loadStateStore() {
+  if (isGoogleSheetsStorageEnabled()) {
+    return loadStateFromGoogleSheets();
+  }
+
+  return loadState();
+}
+
+async function persistStateStore(nextState) {
+  if (isGoogleSheetsStorageEnabled()) {
+    return persistStateToGoogleSheets(nextState);
+  }
+
+  return persistState(nextState);
+}
+
 function getAreaDirectory() {
   const payload = readOptionalJson(AREA_DIRECTORY_FILE, { areas: [] });
   return Array.isArray(payload.areas) ? payload.areas : [];
@@ -172,9 +221,9 @@ function rowHasUsefulContent(row) {
 
 function loadGoogleSnapshot() {
   return readOptionalJson(GOOGLE_SNAPSHOT_FILE, {
-    spreadsheetId: "",
+    spreadsheetId: SOURCE_SPREADSHEET_ID,
     spreadsheetTitle: "",
-    sheetName: "Open Item List",
+    sheetName: SOURCE_SHEET_NAME,
     importedAt: "",
     headers: [],
     rows: [],
@@ -182,12 +231,13 @@ function loadGoogleSnapshot() {
 }
 
 function loadLiveSyncConfig() {
-  return readOptionalJson(LIVE_SYNC_CONFIG_FILE, {
-    enabled: false,
-    sourceType: "csv",
-    sourceUrl: "",
-    intervalMs: 300000,
-  });
+  const fileConfig = readOptionalJson(LIVE_SYNC_CONFIG_FILE, {});
+  return {
+    enabled: process.env.LIVE_SYNC_ENABLED === "true" ? true : Boolean(fileConfig.enabled),
+    sourceType: normalizeLiveSyncSourceType(process.env.LIVE_SYNC_SOURCE_TYPE || fileConfig.sourceType || "csv"),
+    sourceUrl: process.env.LIVE_SYNC_SOURCE_URL || fileConfig.sourceUrl || "",
+    intervalMs: Math.max(30000, Number(process.env.LIVE_SYNC_INTERVAL_MS || fileConfig.intervalMs) || 300000),
+  };
 }
 
 function loadAuthConfig() {
@@ -203,6 +253,10 @@ function loadAuthConfig() {
 function persistLiveSyncConfig(config) {
   writeJson(LIVE_SYNC_CONFIG_FILE, config);
   return config;
+}
+
+function normalizeLiveSyncSourceType(value) {
+  return value === "json" || value === "google-sheets" ? value : "csv";
 }
 
 function computeFingerprint(value) {
@@ -347,12 +401,13 @@ async function verifyGoogleCredential(credential) {
   };
 }
 
-function mapSnapshotToState(snapshot, existingState = null) {
-  const areas = getAreaDirectory();
+function mapSnapshotToState(snapshot, existingState = null, areasOverride = null, votesOverride = null) {
+  const areas = Array.isArray(areasOverride) && areasOverride.length ? areasOverride : getAreaDirectory();
   const areaColumns = areas.filter((area) => area.sourceColumn);
-  const previousVotes = new Map(
-    (existingState?.openItems || []).map((item) => [item.id, item.votes || []]),
-  );
+  const previousVotes = votesOverride instanceof Map
+    ? votesOverride
+    : new Map((existingState?.openItems || []).map((item) => [item.id, item.votes || []]));
+  const sourceType = snapshot.sourceType || existingState?.source?.type || "google-sheet-snapshot";
 
   const openItems = (snapshot.rows || [])
     .filter(rowHasUsefulContent)
@@ -386,9 +441,11 @@ function mapSnapshotToState(snapshot, existingState = null) {
     areas,
     openItems,
     source: {
-      type: "google-sheet-snapshot",
+      type: sourceType,
       spreadsheetId: snapshot.spreadsheetId || "",
       spreadsheetTitle: snapshot.spreadsheetTitle || "",
+      sheetName: snapshot.sheetName || SOURCE_SHEET_NAME,
+      sheetHeaders: Array.isArray(snapshot.headers) ? snapshot.headers : OPEN_ITEM_HEADERS,
       importedAt: snapshot.importedAt || new Date().toISOString(),
     },
     lastSavedAt: new Date().toISOString(),
@@ -589,9 +646,9 @@ function buildSnapshotFromCsv(csvText, spreadsheetTitle = "Imported Open Item Li
   const getValue = (row, header) => row[columnIndexes.get(header)] || "";
 
   const snapshot = {
-    spreadsheetId: "",
-    spreadsheetTitle,
-    sheetName: "Open Item List",
+    spreadsheetId: SOURCE_SPREADSHEET_ID,
+    spreadsheetTitle: spreadsheetTitle || "",
+    sheetName: SOURCE_SHEET_NAME,
     importedAt: new Date().toISOString(),
     headers: headerRow,
     rows: bodyRows.map((row) => ({
@@ -631,9 +688,9 @@ function buildSnapshotFromJson(payload) {
   }
 
   const snapshot = {
-    spreadsheetId: payload.spreadsheetId || "",
-    spreadsheetTitle: payload.spreadsheetTitle || "Live Sync JSON",
-    sheetName: payload.sheetName || "Open Item List",
+    spreadsheetId: payload.spreadsheetId || SOURCE_SPREADSHEET_ID,
+    spreadsheetTitle: payload.spreadsheetTitle || "",
+    sheetName: payload.sheetName || SOURCE_SHEET_NAME,
     importedAt: new Date().toISOString(),
     headers: Array.isArray(payload.headers) ? payload.headers : [],
     rows: payload.rows,
@@ -644,12 +701,476 @@ function buildSnapshotFromJson(payload) {
 }
 
 async function importSnapshotIntoState(snapshot) {
-  const currentState = loadState();
-  const nextState = persistState(mapSnapshotToState(snapshot, currentState));
+  const currentState = await loadStateStore();
+  const nextState = await persistStateStore(mapSnapshotToState(snapshot, currentState));
   return nextState;
 }
 
+function isGoogleSheetsStorageEnabled() {
+  return Boolean(loadServiceAccountCredentials());
+}
+
+function chunkRows(rows, size = 500) {
+  const chunks = [];
+  for (let index = 0; index < rows.length; index += size) {
+    chunks.push(rows.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function toA1Column(columnIndex) {
+  let index = columnIndex + 1;
+  let label = "";
+  while (index > 0) {
+    const remainder = (index - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    index = Math.floor((index - 1) / 26);
+  }
+  return label;
+}
+
+function buildSheetValuesMap(values) {
+  if (!Array.isArray(values) || !values.length) {
+    return [];
+  }
+
+  const [headers, ...rows] = values;
+  const normalizedHeaders = headers.map((header) => String(header || "").trim());
+  return rows.map((row) => {
+    const record = {};
+    normalizedHeaders.forEach((header, index) => {
+      record[header] = row[index] || "";
+    });
+    return record;
+  });
+}
+
+function normalizeSheetRangeName(rangeValue) {
+  return String(rangeValue || "")
+    .split("!")[0]
+    .replace(/^'/, "")
+    .replace(/'$/, "");
+}
+
+function buildOpenItemHeaders(state, areas) {
+  const headerSet = new Set(
+    Array.isArray(state.source?.sheetHeaders) && state.source.sheetHeaders.length
+      ? state.source.sheetHeaders
+      : OPEN_ITEM_HEADERS,
+  );
+
+  OPEN_ITEM_HEADERS.forEach((header) => headerSet.add(header));
+  areas
+    .filter((area) => area.sourceColumn)
+    .forEach((area) => headerSet.add(area.sourceColumn));
+
+  return Array.from(headerSet);
+}
+
+function parseAreasSheetRows(values) {
+  const records = buildSheetValuesMap(values);
+  return records
+    .filter((record) => String(record.id || "").trim() && String(record.name || "").trim())
+    .map((record) => ({
+      id: String(record.id || "").trim(),
+      name: String(record.name || "").trim(),
+      owner: String(record.owner || "").trim(),
+      email: String(record.email || "").trim(),
+      sourceColumn: String(record.sourceColumn || "").trim(),
+    }));
+}
+
+function parseVotesSheetRows(values) {
+  const records = buildSheetValuesMap(values);
+  const voteMap = new Map();
+
+  records.forEach((record) => {
+    const openItemId = String(record.openItemId || "").trim();
+    const areaId = String(record.areaId || "").trim();
+    if (!openItemId || !areaId) {
+      return;
+    }
+
+    if (!voteMap.has(openItemId)) {
+      voteMap.set(openItemId, []);
+    }
+
+    voteMap.get(openItemId).push({
+      areaId,
+      decision: String(record.decision || "").trim() || "needs-info",
+      comment: String(record.comment || "").trim(),
+      createdAt: String(record.createdAt || "").trim() || new Date().toISOString(),
+    });
+  });
+
+  return voteMap;
+}
+
+function buildOpenItemsRowsFromState(state, areas) {
+  const areaColumns = areas.filter((area) => area.sourceColumn);
+  const headers = buildOpenItemHeaders(state, areas);
+
+  return state.openItems.map((item) => {
+    const baseRow = item.rawSheetRow && typeof item.rawSheetRow === "object"
+      ? { ...item.rawSheetRow }
+      : {};
+    const impactedAreaIds = new Set(Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : []);
+
+    baseRow.ID = item.id || "";
+    baseRow["Open Item Description"] = item.title || "";
+    baseRow.Owner = item.ownerName || "";
+    baseRow["Date Created"] = item.createdAt || "";
+    baseRow["Due Date"] = item.dueDate || "";
+    baseRow.Status = item.status || "open";
+    baseRow["Comments/Updates"] = item.description || "";
+    baseRow["Minutes Related"] = baseRow["Minutes Related"] || "";
+    baseRow["Git Repository"] = baseRow["Git Repository"] || "";
+    baseRow["Jira Tickets Related"] = baseRow["Jira Tickets Related"] || "";
+    baseRow["CCB Score"] = item.ccbScore || "";
+    baseRow["CCB Status"] = item.externalStatus || (item.isSubstantial ? "REVIEW" : "No Localized");
+
+    areaColumns.forEach((area) => {
+      baseRow[area.sourceColumn] = impactedAreaIds.has(area.id) ? "TRUE" : "FALSE";
+    });
+
+    return headers.map((header) => String(baseRow[header] || "").trim());
+  });
+}
+
+function buildAreasSheetRows(areas) {
+  return [
+    AREA_HEADERS,
+    ...areas.map((area) => AREA_HEADERS.map((header) => String(area[header] || "").trim())),
+  ];
+}
+
+function buildVotesSheetRows(state) {
+  const rows = [];
+  state.openItems.forEach((item) => {
+    (item.votes || []).forEach((vote) => {
+      rows.push([
+        item.id || "",
+        vote.areaId || "",
+        vote.decision || "",
+        vote.comment || "",
+        vote.createdAt || "",
+      ]);
+    });
+  });
+
+  return [VOTE_HEADERS, ...rows];
+}
+
+function loadServiceAccountCredentials() {
+  if (GOOGLE_SERVICE_ACCOUNT_JSON) {
+    return JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
+  }
+
+  if (GOOGLE_SERVICE_ACCOUNT_KEY_PATH) {
+    return readJson(path.resolve(GOOGLE_SERVICE_ACCOUNT_KEY_PATH));
+  }
+
+  return null;
+}
+
+function getGoogleSheetsJwtClient() {
+  const credentials = loadServiceAccountCredentials();
+  if (!credentials?.client_email || !credentials?.private_key) {
+    throw new Error("Google Sheets API no configurada: falta service account");
+  }
+
+  return new JWT({
+    email: credentials.client_email,
+    key: credentials.private_key,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+}
+
+async function fetchGoogleSheetsJson(url) {
+  const client = getGoogleSheetsJwtClient();
+  const headers = await client.getRequestHeaders(url);
+  const response = await fetch(url, { headers });
+
+  if (!response.ok) {
+    throw new Error(`Google Sheets API error ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function fetchSnapshotFromGoogleSheetsApi() {
+  const spreadsheetId = SOURCE_SPREADSHEET_ID;
+  const encodedSheetName = encodeURIComponent(SOURCE_SHEET_NAME);
+  const metadataUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}` +
+    `?fields=properties(title),sheets(properties(sheetId,title))`;
+  const valuesUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodedSheetName}`;
+
+  const [metadata, valuesPayload] = await Promise.all([
+    fetchGoogleSheetsJson(metadataUrl),
+    fetchGoogleSheetsJson(valuesUrl),
+  ]);
+
+  const values = Array.isArray(valuesPayload.values) ? valuesPayload.values : [];
+  if (!values.length) {
+    throw new Error(`La hoja ${SOURCE_SHEET_NAME} no tiene datos`);
+  }
+
+  const headerRow = values[0];
+  const bodyRows = values.slice(1);
+  const columnIndexes = new Map(headerRow.map((header, index) => [header, index]));
+  const getValue = (row, header) => row[columnIndexes.get(header)] || "";
+  const matchedSheet = Array.isArray(metadata.sheets)
+    ? metadata.sheets.find((sheet) => sheet.properties?.title === SOURCE_SHEET_NAME)
+    : null;
+
+  const snapshot = {
+    spreadsheetId,
+    spreadsheetTitle: metadata.properties?.title || "",
+    sheetName: SOURCE_SHEET_NAME,
+    sourceType: "google-sheets",
+    sheetGid: matchedSheet?.properties?.sheetId ?? null,
+    importedAt: new Date().toISOString(),
+    headers: headerRow,
+    rows: bodyRows.map((row) => ({
+      id: getValue(row, "ID"),
+      description: getValue(row, "Open Item Description"),
+      owner: getValue(row, "Owner"),
+      dateCreated: getValue(row, "Date Created"),
+      dueDate: getValue(row, "Due Date"),
+      status: getValue(row, "Status"),
+      comments: getValue(row, "Comments/Updates"),
+      Software: getValue(row, "Software"),
+      Product: getValue(row, "Product"),
+      Quality: getValue(row, "Quality"),
+      Machine: getValue(row, "Machine"),
+      Testing: getValue(row, "Testing"),
+      Infra: getValue(row, "Infra"),
+      Optics: getValue(row, "Optics"),
+      Data: getValue(row, "Data"),
+      Research: getValue(row, "Research"),
+      Exploration: getValue(row, "Exploration"),
+      Mecha: getValue(row, "Mecha"),
+      minutesRelated: getValue(row, "Minutes Related"),
+      gitRepository: getValue(row, "Git Repository"),
+      ccbScore: getValue(row, "CCB Score"),
+      ccbStatus: getValue(row, "CCB Status"),
+      jiraTicketsRelated: getValue(row, "Jira Tickets Related"),
+    })),
+  };
+
+  writeJson(GOOGLE_SNAPSHOT_FILE, snapshot);
+  return snapshot;
+}
+
+async function batchGetSpreadsheetValues(ranges) {
+  const spreadsheetId = SOURCE_SPREADSHEET_ID;
+  const query = ranges
+    .map((range) => `ranges=${encodeURIComponent(range)}`)
+    .join("&");
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${query}`;
+  const payload = await fetchGoogleSheetsJson(url);
+  const valueRanges = Array.isArray(payload.valueRanges) ? payload.valueRanges : [];
+  const results = new Map();
+
+  valueRanges.forEach((entry) => {
+    results.set(normalizeSheetRangeName(entry.range), entry.values || []);
+  });
+
+  return results;
+}
+
+async function fetchSpreadsheetMetadata() {
+  const url =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
+    "?fields=properties(title),sheets(properties(sheetId,title))";
+  return fetchGoogleSheetsJson(url);
+}
+
+async function ensureSpreadsheetSheets(sheetNames) {
+  const metadata = await fetchSpreadsheetMetadata();
+  const existingNames = new Set(
+    (metadata.sheets || []).map((sheet) => sheet.properties?.title).filter(Boolean),
+  );
+  const requests = sheetNames
+    .filter((sheetName) => !existingNames.has(sheetName))
+    .map((sheetName) => ({
+      addSheet: {
+        properties: {
+          title: sheetName,
+        },
+      },
+    }));
+
+  if (!requests.length) {
+    return metadata;
+  }
+
+  const client = getGoogleSheetsJwtClient();
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}:batchUpdate`;
+  const headers = await client.getRequestHeaders(url);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ requests }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google Sheets batchUpdate error ${response.status}`);
+  }
+
+  return fetchSpreadsheetMetadata();
+}
+
+async function clearAndWriteSheet(sheetName, rows) {
+  const client = getGoogleSheetsJwtClient();
+  const clearUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
+    `/values/${encodeURIComponent(sheetName)}:clear`;
+  const clearHeaders = await client.getRequestHeaders(clearUrl);
+  const clearResponse = await fetch(clearUrl, {
+    method: "POST",
+    headers: {
+      ...clearHeaders,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+
+  if (!clearResponse.ok) {
+    throw new Error(`Google Sheets clear error ${clearResponse.status}`);
+  }
+
+  if (!rows.length) {
+    return;
+  }
+
+  const maxColumns = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  const targetRange = `${sheetName}!A1:${toA1Column(Math.max(0, maxColumns - 1))}${rows.length}`;
+  const updateUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
+    `/values/${encodeURIComponent(targetRange)}?valueInputOption=RAW`;
+  const updateHeaders = await client.getRequestHeaders(updateUrl);
+  const updateResponse = await fetch(updateUrl, {
+    method: "PUT",
+    headers: {
+      ...updateHeaders,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      range: targetRange,
+      majorDimension: "ROWS",
+      values: rows,
+    }),
+  });
+
+  if (!updateResponse.ok) {
+    throw new Error(`Google Sheets update error ${updateResponse.status}`);
+  }
+}
+
+async function loadStateFromGoogleSheets() {
+  const metadata = await fetchSpreadsheetMetadata();
+  const existingSheets = new Set(
+    (metadata.sheets || []).map((sheet) => sheet.properties?.title).filter(Boolean),
+  );
+  const ranges = [SOURCE_SHEET_NAME];
+  if (existingSheets.has(AREAS_SHEET_NAME)) {
+    ranges.push(AREAS_SHEET_NAME);
+  }
+  if (existingSheets.has(VOTES_SHEET_NAME)) {
+    ranges.push(VOTES_SHEET_NAME);
+  }
+  const valueMap = await batchGetSpreadsheetValues(ranges);
+  const openItemValues = valueMap.get(SOURCE_SHEET_NAME) || [];
+  const areaValues = valueMap.get(AREAS_SHEET_NAME) || [];
+  const voteValues = valueMap.get(VOTES_SHEET_NAME) || [];
+  const areas = parseAreasSheetRows(areaValues);
+  const votesMap = parseVotesSheetRows(voteValues);
+  const effectiveAreas = areas.length ? areas : getAreaDirectory();
+  const snapshot = {
+    spreadsheetId: SOURCE_SPREADSHEET_ID,
+    spreadsheetTitle: metadata.properties?.title || "",
+    sheetName: SOURCE_SHEET_NAME,
+    sourceType: "google-sheets",
+    importedAt: new Date().toISOString(),
+    headers: openItemValues[0] || OPEN_ITEM_HEADERS,
+    rows: buildSheetValuesMap(openItemValues).map((record) => ({
+      id: record.ID || "",
+      description: record["Open Item Description"] || "",
+      owner: record.Owner || "",
+      dateCreated: record["Date Created"] || "",
+      dueDate: record["Due Date"] || "",
+      status: record.Status || "",
+      comments: record["Comments/Updates"] || "",
+      Software: record.Software || "",
+      Product: record.Product || "",
+      Quality: record.Quality || "",
+      Machine: record.Machine || "",
+      Testing: record.Testing || "",
+      Infra: record.Infra || "",
+      Optics: record.Optics || "",
+      Data: record.Data || "",
+      Research: record.Research || "",
+      Exploration: record.Exploration || "",
+      Mecha: record.Mecha || "",
+      minutesRelated: record["Minutes Related"] || "",
+      gitRepository: record["Git Repository"] || "",
+      ccbScore: record["CCB Score"] || "",
+      ccbStatus: record["CCB Status"] || "",
+      jiraTicketsRelated: record["Jira Tickets Related"] || "",
+    })),
+  };
+
+  const state = mapSnapshotToState(snapshot, null, effectiveAreas, votesMap);
+  state.source = {
+    ...state.source,
+    type: "google-sheets",
+    sheetName: SOURCE_SHEET_NAME,
+    sheetHeaders: snapshot.headers,
+  };
+  return state;
+}
+
+async function persistStateToGoogleSheets(nextState) {
+  const normalizedState = sanitizeState(nextState);
+  const areas = Array.isArray(normalizedState.areas) && normalizedState.areas.length
+    ? normalizedState.areas
+    : getAreaDirectory();
+  const headers = buildOpenItemHeaders(normalizedState, areas);
+  normalizedState.source = {
+    ...(normalizedState.source || {}),
+    type: "google-sheets",
+    spreadsheetId: SOURCE_SPREADSHEET_ID,
+    sheetName: SOURCE_SHEET_NAME,
+    sheetHeaders: headers,
+  };
+  const openItemRows = buildOpenItemsRowsFromState(normalizedState, areas);
+  const areaRows = buildAreasSheetRows(areas);
+  const voteRows = buildVotesSheetRows(normalizedState);
+
+  await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME]);
+  await Promise.all([
+    clearAndWriteSheet(SOURCE_SHEET_NAME, [
+      headers,
+      ...openItemRows,
+    ]),
+    clearAndWriteSheet(AREAS_SHEET_NAME, areaRows),
+    clearAndWriteSheet(VOTES_SHEET_NAME, voteRows),
+  ]);
+
+  return loadStateFromGoogleSheets();
+}
+
 async function fetchLiveSyncSnapshot(config) {
+  if (config.sourceType === "google-sheets") {
+    return fetchSnapshotFromGoogleSheetsApi();
+  }
+
   if (!config.sourceUrl) {
     throw new Error("No live sync source URL configured");
   }
@@ -686,7 +1207,7 @@ async function runLiveSyncCheck() {
     lastError: "",
   };
 
-  if (!config.enabled || !config.sourceUrl) {
+  if (!config.enabled || (config.sourceType !== "google-sheets" && !config.sourceUrl)) {
     liveSyncStatus.isRunning = false;
     return;
   }
@@ -723,7 +1244,7 @@ function restartLiveSyncScheduler() {
     intervalMs: Number(config.intervalMs) || 300000,
   };
 
-  if (!config.enabled || !config.sourceUrl) {
+  if (!config.enabled || (config.sourceType !== "google-sheets" && !config.sourceUrl)) {
     return;
   }
 
@@ -860,7 +1381,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && pathname === "/api/state") {
-      const state = loadState();
+      const state = await loadStateStore();
       sendJson(response, 200, {
         state,
         prerequisite: derivePrerequisiteStatus(state),
@@ -871,7 +1392,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && pathname === "/api/state") {
       const body = await parseBody(request);
-      const nextState = persistState(sanitizeState(body));
+      const nextState = await persistStateStore(sanitizeState(body));
       sendJson(response, 200, {
         state: nextState,
         prerequisite: derivePrerequisiteStatus(nextState),
@@ -881,12 +1402,12 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && pathname === "/api/reports/daily") {
-      sendJson(response, 200, buildDailyReport(loadState()));
+      sendJson(response, 200, buildDailyReport(await loadStateStore()));
       return;
     }
 
     if (request.method === "POST" && pathname === "/api/reset") {
-      const nextState = persistState(createDefaultState());
+      const nextState = await persistStateStore(createDefaultState());
       sendJson(response, 200, {
         state: nextState,
         prerequisite: derivePrerequisiteStatus(nextState),
@@ -896,8 +1417,11 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && pathname === "/api/import/google-sheet-snapshot") {
-      const currentState = loadState();
-      const nextState = persistState(mapSnapshotToState(loadGoogleSnapshot(), currentState));
+      const snapshot = loadServiceAccountCredentials()
+        ? await fetchSnapshotFromGoogleSheetsApi()
+        : loadGoogleSnapshot();
+      const currentState = await loadStateStore();
+      const nextState = await persistStateStore(mapSnapshotToState(snapshot, currentState));
       sendJson(response, 200, {
         state: nextState,
         prerequisite: derivePrerequisiteStatus(nextState),
@@ -930,7 +1454,7 @@ const server = http.createServer(async (request, response) => {
       const body = await parseBody(request);
       const nextConfig = persistLiveSyncConfig({
         enabled: Boolean(body.enabled),
-        sourceType: body.sourceType === "json" ? "json" : "csv",
+        sourceType: normalizeLiveSyncSourceType(body.sourceType),
         sourceUrl: String(body.sourceUrl || "").trim(),
         intervalMs: Math.max(30000, Number(body.intervalMs) || 300000),
       });
@@ -944,7 +1468,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && pathname === "/api/live-sync/run") {
       await runLiveSyncCheck();
-      const state = loadState();
+      const state = await loadStateStore();
       sendJson(response, 200, {
         config: loadLiveSyncConfig(),
         status: liveSyncStatus,

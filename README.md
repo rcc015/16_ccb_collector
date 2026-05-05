@@ -50,6 +50,27 @@ Para convertir este MVP en una app operativa en tu proceso real, te recomiendo:
 - `data/google-open-items-snapshot.json`: snapshot transformado desde el Google Sheet real.
 - `data/area-directory.json`: directorio de areas y owners; aqui debes completar los owners reales.
 
+## Google Sheets API con service account
+
+Si quieres que la fuente de verdad sea siempre el spreadsheet real, sin depender del nombre del archivo ni de una URL publicada, configura una service account con acceso de lectura y escritura al sheet.
+
+Variables relevantes:
+
+- `SOURCE_SPREADSHEET_ID`: id fijo del spreadsheet
+- `SOURCE_SHEET_NAME`: nombre de la pestaña a leer
+- `AREAS_SHEET_NAME`: pestaña para areas administradas por la app
+- `VOTES_SHEET_NAME`: pestaña para votos administrados por la app
+- `GOOGLE_SERVICE_ACCOUNT_KEY_PATH`: ruta local al JSON de la service account
+- `GOOGLE_SERVICE_ACCOUNT_JSON`: alternativa para inyectar el JSON completo por variable
+- `LIVE_SYNC_SOURCE_TYPE=google-sheets`
+
+Notas:
+
+- Comparte el spreadsheet con el `client_email` de la service account como `Editor`.
+- El titulo del spreadsheet no se usa como clave de configuracion; se lee dinamicamente desde Google.
+- Si configuras service account, la app puede leer y guardar estado completo en el spreadsheet.
+- La app usa `Open Item List` como hoja principal de open items y crea/actualiza pestañas auxiliares para areas y votos.
+
 ## Flujo operativo recomendado
 
 1. En Google Sheets abre la pestaña `Open Item List`.

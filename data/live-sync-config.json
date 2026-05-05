@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "sourceType": "csv",
   "sourceUrl": "",
   "intervalMs": 300000

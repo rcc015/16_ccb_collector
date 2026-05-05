@@ -7,7 +7,6 @@ const state = {
 
 const prerequisiteCard = document.getElementById("prerequisite-card");
 const areasList = document.getElementById("areas-list");
-const areaForm = document.getElementById("area-form");
 const ownerAreaSelect = document.getElementById("owner-area-select");
 const impactedAreasContainer = document.getElementById("impacted-areas");
 const openItemForm = document.getElementById("open-item-form");
@@ -24,6 +23,84 @@ const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
 const authStatus = document.getElementById("auth-status");
 const currentUser = document.getElementById("current-user");
+const sourceStatus = document.getElementById("source-status");
+const guidelineList = document.getElementById("guideline-list");
+const decisionFramework = document.getElementById("decision-framework");
+const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
+const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+
+const OIL_GUIDELINES = [
+  {
+    title: "OI_ID",
+    body: "Usa un identificador unico con formato [Project]_[Type]_[Sequence].",
+    example: "OI_E30",
+    bullets: ["Type: E = Enhancement", "Type: B = Bug", "Type: C = Compliance"],
+  },
+  {
+    title: "Open Item Description",
+    body: "Describe el cambio de forma breve pero accionable.",
+    example: "Add two-factor authentication (2FA) to login flow",
+    bullets: ["Que cambia", "Donde cambia", "Por que se necesita"],
+  },
+  {
+    title: "Strategic Alignment",
+    body: "Explica alineacion con roadmap, objetivos de negocio y posicionamiento.",
+    example: "Aligns with 2025 security roadmap",
+    bullets: ["1 = No alignment", "3 = Indirect support", "5 = Critical to strategy"],
+  },
+  {
+    title: "Risk Assessment",
+    body: "Evalua complejidad tecnica, compliance y efecto al cliente si falla o se retrasa.",
+    example: "Low technical risk; critical for GDPR compliance",
+    bullets: ["1 = High risk", "5 = Low risk"],
+  },
+  {
+    title: "Resource Impact",
+    body: "Cuantifica horas, costo y disrupcion en timeline.",
+    example: "120 eng hours; $8k vendor costs",
+    bullets: ["Engineering hours", "Cost ($)", "Timeline impact (days/weeks)"],
+  },
+];
+
+const CCB_FRAMEWORK = [
+  {
+    title: "Strategic Alignment",
+    weight: "0.30",
+    note: "Debe puntuar >= 4 para aprobar.",
+    bullets: ["Supports product roadmap", "Advances business goals", "Enhances competitive position"],
+  },
+  {
+    title: "Risk Assessment",
+    weight: "0.25",
+    note: "Rechazar si safety/compliance risk > 3.",
+    bullets: ["Technical complexity", "Safety/compliance risks", "Customer impact if failed"],
+  },
+  {
+    title: "Resource Impact",
+    weight: "0.20",
+    note: "Levantar bandera si score <= 2.",
+    bullets: ["Engineering hours", "Cost (dev, testing, rollout)", "Timeline disruption"],
+  },
+  {
+    title: "Customer Value",
+    weight: "0.15",
+    note: "Requiere supporting data.",
+    bullets: ["Solves critical pain points", "Expected adoption/upsell", "CSAT/NPS impact"],
+  },
+  {
+    title: "Operational Feasibility",
+    weight: "0.10",
+    note: "Evalua si realmente se puede ejecutar ahora.",
+    bullets: ["Ease of implementation", "Maintenance burden", "Supplier/partner readiness"],
+  },
+];
+
+const DECISION_THRESHOLDS = [
+  ">= 4.0: APPROVE",
+  "3.0-3.9: DEFER (Requires rework)",
+  "< 3.0: REJECT",
+  "Fast-track: risk = 5 + resource impact = 5 + critical security/legal fix",
+];
 
 let authConfig = null;
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
@@ -48,6 +125,83 @@ function impactedAreaNames(item) {
 
 function ownerAreaName(areaId) {
   return state.areas.find((area) => area.id === areaId)?.name || "Unassigned";
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "N/A";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function renderSourceStatus() {
+  const source = state.source || {};
+  const sourceType = source.type || "local";
+  const sourceLabel = {
+    "google-sheets": "Google Sheets",
+    "google-sheet-snapshot": "Snapshot de Google Sheet",
+    local: "Estado local",
+  }[sourceType] || sourceType;
+  const title = source.spreadsheetTitle || "Sin titulo cargado";
+  const sheetName = source.sheetName || "Open Item List";
+  const importedAt = source.importedAt || state.lastSavedAt || "";
+
+  sourceStatus.dataset.mode = sourceType;
+  sourceStatus.innerHTML = [
+    `<div><strong>Fuente activa:</strong> ${sourceLabel}</div>`,
+    `<div><strong>Spreadsheet:</strong> ${title}</div>`,
+    `<div><strong>Hoja:</strong> ${sheetName}</div>`,
+    `<div><strong>Ultima carga:</strong> ${formatDateTime(importedAt)}</div>`,
+    `<div><strong>Ultimo guardado:</strong> ${formatDateTime(state.lastSavedAt)}</div>`,
+  ].join("");
+}
+
+function renderReferencePanels() {
+  guidelineList.innerHTML = OIL_GUIDELINES.map((item) => `
+    <article class="reference-card">
+      <h3>${item.title}</h3>
+      <p>${item.body}</p>
+      <ul>${item.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
+      <span class="reference-badge">Ejemplo: ${item.example}</span>
+    </article>
+  `).join("");
+
+  decisionFramework.innerHTML = [
+    ...CCB_FRAMEWORK.map((item) => `
+      <article class="reference-card">
+        <h3>${item.title}</h3>
+        <p>${item.note}</p>
+        <ul>${item.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
+        <span class="reference-badge">Weight ${item.weight}</span>
+      </article>
+    `),
+    `
+      <article class="reference-card">
+        <h3>Decision Thresholds</h3>
+        <ul>${DECISION_THRESHOLDS.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
+      </article>
+    `,
+  ].join("");
+}
+
+function activateTab(tabId) {
+  tabButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.tab === tabId);
+  });
+
+  tabPanels.forEach((panel) => {
+    panel.classList.toggle("is-active", panel.dataset.tabPanel === tabId);
+  });
+}
+
+async function parseApiResponse(response, fallbackMessage) {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.detail || payload.error || fallbackMessage);
+  }
+  return payload;
 }
 
 function formatOwnerLine(item) {
@@ -84,10 +238,22 @@ function renderAreas() {
   impactedAreasContainer.innerHTML = "";
 
   state.areas.forEach((area) => {
-    const chip = document.createElement("div");
-    chip.className = "chip";
-    chip.textContent = `${area.name} · ${area.owner}`;
-    areasList.appendChild(chip);
+    const card = document.createElement("article");
+    card.className = "area-editor-card";
+    card.innerHTML = `
+      <div class="area-editor-head">
+        <div>
+          <h3>${area.name}</h3>
+          <p class="meta-line">${area.sourceColumn || area.id}</p>
+        </div>
+        <span class="chip">${area.id}</span>
+      </div>
+      <div class="area-editor-grid">
+        <input data-area-field="owner" data-area-id="${area.id}" placeholder="Owner" value="${area.owner || ""}" />
+        <input data-area-field="email" data-area-id="${area.id}" type="email" placeholder="Email del owner" value="${area.email || ""}" />
+      </div>
+    `;
+    areasList.appendChild(card);
 
     const option = document.createElement("option");
     option.value = area.id;
@@ -98,6 +264,18 @@ function renderAreas() {
     label.className = "checkbox";
     label.innerHTML = `<input type="checkbox" value="${area.id}" /> ${area.name}`;
     impactedAreasContainer.appendChild(label);
+  });
+
+  areasList.querySelectorAll("[data-area-field]").forEach((input) => {
+    input.addEventListener("input", (event) => {
+      const areaId = event.currentTarget.dataset.areaId;
+      const field = event.currentTarget.dataset.areaField;
+      const area = state.areas.find((candidate) => candidate.id === areaId);
+      if (!area || !field) {
+        return;
+      }
+      area[field] = event.currentTarget.value.trim();
+    });
   });
 }
 
@@ -236,6 +414,7 @@ function refreshDerivedViews() {
   renderPrerequisite(prerequisite);
   renderAreas();
   renderOpenItems();
+  renderSourceStatus();
   dailyReport.textContent = buildDailyReportText(prerequisite);
 }
 
@@ -245,7 +424,7 @@ async function saveState() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(state),
   });
-  const payload = await response.json();
+  const payload = await parseApiResponse(response, "No se pudo guardar el estado.");
   Object.assign(state, payload.state);
   refreshDerivedViews();
 }
@@ -256,11 +435,12 @@ async function loadState() {
     showAuthOnly("Inicia sesion con Google para continuar.");
     return;
   }
-  const payload = await response.json();
+  const payload = await parseApiResponse(response, "No se pudo cargar el estado.");
   Object.assign(state, payload.state);
   renderPrerequisite(payload.prerequisite);
   renderAreas();
   renderOpenItems();
+  renderSourceStatus();
   dailyReport.textContent = buildDailyReportText(payload.prerequisite);
 }
 
@@ -342,6 +522,7 @@ function renderLiveSyncStatus(payload) {
   liveSyncSourceType.value = config.sourceType || "csv";
   liveSyncSourceUrl.value = config.sourceUrl || "";
   liveSyncIntervalMs.value = config.intervalMs || 300000;
+  updateLiveSyncSourceUi();
 
   liveSyncStatus.textContent = [
     `Enabled: ${config.enabled ? "Yes" : "No"}`,
@@ -354,6 +535,14 @@ function renderLiveSyncStatus(payload) {
   ].join("\n");
 }
 
+function updateLiveSyncSourceUi() {
+  const usesGoogleSheets = liveSyncSourceType.value === "google-sheets";
+  liveSyncSourceUrl.disabled = usesGoogleSheets;
+  liveSyncSourceUrl.placeholder = usesGoogleSheets
+    ? "No se requiere URL: usa Google Sheets API con service account"
+    : "https://script.google.com/... o URL CSV publicada";
+}
+
 async function loadLiveSyncConfig() {
   const response = await fetch(apiUrl("/api/live-sync"));
   if (response.status === 401) {
@@ -364,31 +553,14 @@ async function loadLiveSyncConfig() {
 }
 
 async function applyImportedPayload(response) {
-  const payload = await response.json();
+  const payload = await parseApiResponse(response, "No se pudo sincronizar la informacion.");
   Object.assign(state, payload.state);
   renderPrerequisite(payload.prerequisite);
   renderAreas();
   renderOpenItems();
+  renderSourceStatus();
   dailyReport.textContent = buildDailyReportText(payload.prerequisite);
 }
-
-areaForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const formData = new FormData(event.currentTarget);
-  const name = String(formData.get("name")).trim();
-  const owner = String(formData.get("owner")).trim();
-  const email = String(formData.get("email")).trim();
-
-  state.areas.push({
-    id: slugify(name),
-    name,
-    owner,
-    email,
-  });
-
-  event.currentTarget.reset();
-  refreshDerivedViews();
-});
 
 openItemForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -421,7 +593,13 @@ openItemForm.addEventListener("submit", (event) => {
   refreshDerivedViews();
 });
 
-document.getElementById("save-state").addEventListener("click", saveState);
+document.getElementById("save-state").addEventListener("click", async () => {
+  try {
+    await saveState();
+  } catch (error) {
+    window.alert(error.message || "No se pudo guardar el estado.");
+  }
+});
 
 document.getElementById("copy-report").addEventListener("click", async () => {
   await navigator.clipboard.writeText(dailyReport.textContent);
@@ -438,13 +616,24 @@ document.getElementById("export-state").addEventListener("click", () => {
 });
 
 document.getElementById("load-seed").addEventListener("click", async () => {
-  const response = await fetch(apiUrl("/api/reset"), { method: "POST" });
-  await applyImportedPayload(response);
+  try {
+    const response = await fetch(apiUrl("/api/reset"), { method: "POST" });
+    await applyImportedPayload(response);
+  } catch (error) {
+    window.alert(error.message || "No se pudo restaurar la demo.");
+  }
 });
 
 document.getElementById("sync-google-sheet").addEventListener("click", async () => {
-  const response = await fetch(apiUrl("/api/import/google-sheet-snapshot"), { method: "POST" });
-  await applyImportedPayload(response);
+  try {
+    sourceStatus.textContent = "Sincronizando con la fuente configurada...";
+    const response = await fetch(apiUrl("/api/import/google-sheet-snapshot"), { method: "POST" });
+    await applyImportedPayload(response);
+  } catch (error) {
+    sourceStatus.dataset.mode = "local";
+    sourceStatus.innerHTML = `<strong>Error de sincronizacion:</strong> ${error.message || "No se pudo sincronizar con Google Sheets."}`;
+    window.alert(error.message || "No se pudo sincronizar con Google Sheets.");
+  }
 });
 
 document.getElementById("import-csv-button").addEventListener("click", async () => {
@@ -475,33 +664,47 @@ document.getElementById("import-csv-button").addEventListener("click", async () 
 });
 
 document.getElementById("save-live-sync").addEventListener("click", async () => {
-  const response = await fetch(apiUrl("/api/live-sync"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      enabled: liveSyncEnabled.checked,
-      sourceType: liveSyncSourceType.value,
-      sourceUrl: liveSyncSourceUrl.value.trim(),
-      intervalMs: Number(liveSyncIntervalMs.value || 300000),
-    }),
-  });
-  const payload = await response.json();
-  renderLiveSyncStatus(payload);
+  try {
+    const response = await fetch(apiUrl("/api/live-sync"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: liveSyncEnabled.checked,
+        sourceType: liveSyncSourceType.value,
+        sourceUrl: liveSyncSourceUrl.value.trim(),
+        intervalMs: Number(liveSyncIntervalMs.value || 300000),
+      }),
+    });
+    const payload = await parseApiResponse(response, "No se pudo guardar la configuracion de Live Sync.");
+    renderLiveSyncStatus(payload);
+  } catch (error) {
+    window.alert(error.message || "No se pudo guardar la configuracion de Live Sync.");
+  }
+});
+
+liveSyncSourceType.addEventListener("change", updateLiveSyncSourceUi);
+tabButtons.forEach((button) => {
+  button.addEventListener("click", () => activateTab(button.dataset.tab));
 });
 
 document.getElementById("run-live-sync").addEventListener("click", async () => {
-  const response = await fetch(apiUrl("/api/live-sync/run"), { method: "POST" });
-  if (response.status === 401) {
-    showAuthOnly("Tu sesion expiro. Inicia sesion de nuevo.");
-    return;
+  try {
+    const response = await fetch(apiUrl("/api/live-sync/run"), { method: "POST" });
+    if (response.status === 401) {
+      showAuthOnly("Tu sesion expiro. Inicia sesion de nuevo.");
+      return;
+    }
+    const payload = await parseApiResponse(response, "No se pudo ejecutar la sincronizacion.");
+    renderLiveSyncStatus(payload);
+    Object.assign(state, payload.state);
+    renderPrerequisite(payload.prerequisite);
+    renderAreas();
+    renderOpenItems();
+    renderSourceStatus();
+    dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+  } catch (error) {
+    window.alert(error.message || "No se pudo ejecutar la sincronizacion.");
   }
-  const payload = await response.json();
-  renderLiveSyncStatus(payload);
-  Object.assign(state, payload.state);
-  renderPrerequisite(payload.prerequisite);
-  renderAreas();
-  renderOpenItems();
-  dailyReport.textContent = buildDailyReportText(payload.prerequisite);
 });
 
 document.getElementById("logout-button").addEventListener("click", async () => {
@@ -511,9 +714,16 @@ document.getElementById("logout-button").addEventListener("click", async () => {
 });
 
 (async () => {
-  const hasSession = await loadAuthConfig();
-  if (hasSession) {
-    await loadState();
-    await loadLiveSyncConfig();
+  try {
+    const hasSession = await loadAuthConfig();
+    renderReferencePanels();
+    activateTab("summary");
+    if (hasSession) {
+      await loadState();
+      await loadLiveSyncConfig();
+    }
+  } catch (error) {
+    sourceStatus.dataset.mode = "local";
+    sourceStatus.innerHTML = `<strong>Error inicial:</strong> ${error.message || "No se pudo cargar la app."}`;
   }
 })();
