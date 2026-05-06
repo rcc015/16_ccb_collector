@@ -265,6 +265,48 @@ h1 {
   margin: 0;
 }
 
+.autocomplete-shell {
+  position: relative;
+}
+
+.autocomplete-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 253, 250, 0.98);
+  box-shadow: 0 16px 30px rgba(46, 35, 18, 0.12);
+}
+
+.autocomplete-option {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--ink);
+}
+
+.autocomplete-option:hover {
+  background: var(--accent-soft);
+}
+
+.autocomplete-name {
+  font-weight: 600;
+}
+
+.autocomplete-email {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .stack {
   display: grid;
   gap: 12px;
@@ -278,8 +320,14 @@ h1 {
 
 .grid-form textarea,
 .grid-form > div,
-.grid-form > button {
+.grid-form > button,
+.grid-form > .form-hint {
   grid-column: 1 / -1;
+}
+
+.form-hint {
+  margin-top: -6px;
+  margin-bottom: 2px;
 }
 
 input,

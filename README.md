@@ -71,6 +71,31 @@ Notas:
 - Si configuras service account, la app puede leer y guardar estado completo en el spreadsheet.
 - La app usa `Open Item List` como hoja principal de open items y crea/actualiza pestañas auxiliares para areas y votos.
 
+## Google Sheets con OAuth de usuario
+
+Si la service account no puede acceder por politica o permisos, puedes usar temporalmente tu propia cuenta de Google Workspace para leer/escribir el spreadsheet desde el backend.
+
+Variables relevantes:
+
+- `GOOGLE_SHEETS_AUTH_MODE=user-oauth`
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+- `GOOGLE_OAUTH_REDIRECT_URI`
+
+Pasos:
+
+1. Crea o reutiliza un OAuth Client tipo `Web application`.
+2. Autoriza como redirect URI:
+   - `https://repo-validation.conceivable.life/ccb/api/google-sheets-auth/callback`
+3. Configura las variables anteriores en `.env`.
+4. Reinicia el servicio.
+5. En la tab `Fuentes`, usa `Conectar cuenta`.
+
+Notas:
+
+- Este modo guarda tokens locales en `data/google-user-oauth-token.json`.
+- Es util para destrabar acceso temporal, pero para operacion estable sigue siendo mejor service account.
+
 ## Flujo operativo recomendado
 
 1. En Google Sheets abre la pestaña `Open Item List`.
