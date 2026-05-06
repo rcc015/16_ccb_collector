@@ -10,10 +10,13 @@ const areasList = document.getElementById("areas-list");
 const ownerAreaSelect = document.getElementById("owner-area-select");
 const impactedAreasContainer = document.getElementById("impacted-areas");
 const openItemForm = document.getElementById("open-item-form");
+const openItemIdInput = document.getElementById("open-item-id-input");
+const nextOpenItemHint = document.getElementById("next-open-item-hint");
 const openItemsList = document.getElementById("open-items-list");
 const dailyReport = document.getElementById("daily-report");
 const openItemTemplate = document.getElementById("open-item-template");
 const csvFileInput = document.getElementById("csv-file-input");
+const employeesCsvFileInput = document.getElementById("employees-csv-file-input");
 const liveSyncEnabled = document.getElementById("live-sync-enabled");
 const liveSyncSourceType = document.getElementById("live-sync-source-type");
 const liveSyncSourceUrl = document.getElementById("live-sync-source-url");
@@ -24,8 +27,12 @@ const appShell = document.getElementById("app-shell");
 const authStatus = document.getElementById("auth-status");
 const currentUser = document.getElementById("current-user");
 const sourceStatus = document.getElementById("source-status");
+const employeesImportStatus = document.getElementById("employees-import-status");
+const googleSheetsUserAuthStatus = document.getElementById("google-sheets-user-auth-status");
 const guidelineList = document.getElementById("guideline-list");
 const decisionFramework = document.getElementById("decision-framework");
+const ownerSuggestions = document.getElementById("owner-suggestions");
+const emailSuggestions = document.getElementById("email-suggestions");
 const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
 const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
 
@@ -103,6 +110,7 @@ const DECISION_THRESHOLDS = [
 ];
 
 let authConfig = null;
+let importedContacts = [];
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
 
 function apiUrl(path) {
@@ -125,6 +133,186 @@ function impactedAreaNames(item) {
 
 function ownerAreaName(areaId) {
   return state.areas.find((area) => area.id === areaId)?.name || "Unassigned";
+}
+
+function collectKnownContacts() {
+  const contacts = new Map();
+  const pushContact = (name, email) => {
+    const normalizedName = String(name || "").trim();
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!normalizedName && !normalizedEmail) {
+      return;
+    }
+
+    const key = normalizedEmail || normalizedName.toLowerCase();
+    const existing = contacts.get(key) || { name: "", email: "" };
+    contacts.set(key, {
+      name: normalizedName || existing.name,
+      email: normalizedEmail || existing.email,
+    });
+  };
+
+  state.areas.forEach((area) => pushContact(area.owner, area.email));
+  state.openItems.forEach((item) => pushContact(item.ownerName, ""));
+  importedContacts.forEach((contact) => pushContact(contact.name, contact.email));
+  if (authConfig?.user) {
+    pushContact(authConfig.user.name, authConfig.user.email);
+  }
+
+  return Array.from(contacts.values())
+    .filter((contact) => contact.name || contact.email)
+    .sort((left, right) => (left.name || left.email).localeCompare(right.name || right.email));
+}
+
+function renderContactSuggestions() {
+  const contacts = collectKnownContacts();
+  ownerSuggestions.innerHTML = contacts
+    .filter((contact) => contact.name)
+    .map((contact) => `<option value="${contact.name}" label="${contact.email || contact.name}"></option>`)
+    .join("");
+  emailSuggestions.innerHTML = contacts
+    .filter((contact) => contact.email)
+    .map((contact) => `<option value="${contact.email}" label="${contact.name || contact.email}"></option>`)
+    .join("");
+}
+
+function findContactByName(value) {
+  const normalizedValue = String(value || "").trim().toLowerCase();
+  return collectKnownContacts().find((contact) => (contact.name || "").trim().toLowerCase() === normalizedValue) || null;
+}
+
+function findContactByEmail(value) {
+  const normalizedValue = String(value || "").trim().toLowerCase();
+  return collectKnownContacts().find((contact) => (contact.email || "").trim().toLowerCase() === normalizedValue) || null;
+}
+
+function getMatchingContacts(query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const contacts = collectKnownContacts();
+  if (!normalizedQuery) {
+    return contacts.slice(0, 8);
+  }
+
+  return contacts
+    .filter((contact) => {
+      const name = (contact.name || "").toLowerCase();
+      const email = (contact.email || "").toLowerCase();
+      return name.includes(normalizedQuery) || email.includes(normalizedQuery);
+    })
+    .slice(0, 8);
+}
+
+function setAreaOwnerSelection(areaId, contact) {
+  const area = state.areas.find((candidate) => candidate.id === areaId);
+  if (!area || !contact) {
+    return;
+  }
+
+  area.owner = contact.name || area.owner || "";
+  area.email = contact.email || area.email || "";
+
+  const ownerInput = areasList.querySelector(`[data-area-field="owner"][data-area-id="${areaId}"]`);
+  const emailInput = areasList.querySelector(`[data-area-field="email"][data-area-id="${areaId}"]`);
+  if (ownerInput) {
+    ownerInput.value = area.owner;
+  }
+  if (emailInput) {
+    emailInput.value = area.email;
+  }
+}
+
+function renderOwnerAutocomplete(dropdown, areaId, query) {
+  const matches = getMatchingContacts(query);
+  if (!matches.length) {
+    dropdown.hidden = true;
+    dropdown.innerHTML = "";
+    return;
+  }
+
+  dropdown.innerHTML = matches.map((contact, index) => `
+    <button
+      type="button"
+      class="autocomplete-option"
+      data-area-id="${areaId}"
+      data-contact-index="${index}"
+    >
+      <span class="autocomplete-name">${contact.name || contact.email}</span>
+      <span class="autocomplete-email">${contact.email || ""}</span>
+    </button>
+  `).join("");
+
+  dropdown.hidden = false;
+  dropdown.querySelectorAll(".autocomplete-option").forEach((button) => {
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      const index = Number(button.dataset.contactIndex);
+      const selectedContact = matches[index];
+      setAreaOwnerSelection(areaId, selectedContact);
+      dropdown.hidden = true;
+      dropdown.innerHTML = "";
+    });
+  });
+}
+
+function detectOpenItemIdPattern() {
+  const parsedIds = state.openItems
+    .map((item) => {
+      const match = String(item.id || "").trim().match(/^([A-Za-z]+)([_-])(\d+)$/);
+      if (!match) {
+        return null;
+      }
+      return {
+        prefix: match[1].toUpperCase(),
+        separator: match[2],
+        number: Number(match[3]),
+        width: match[3].length,
+      };
+    })
+    .filter(Boolean);
+
+  if (!parsedIds.length) {
+    return { prefix: "OI", separator: "_", nextNumber: 1, width: 3 };
+  }
+
+  const summaryByPattern = new Map();
+  parsedIds.forEach((entry) => {
+    const key = `${entry.prefix}${entry.separator}`;
+    const current = summaryByPattern.get(key) || {
+      prefix: entry.prefix,
+      separator: entry.separator,
+      maxNumber: 0,
+      width: entry.width,
+      count: 0,
+    };
+    current.maxNumber = Math.max(current.maxNumber, entry.number);
+    current.width = Math.max(current.width, entry.width);
+    current.count += 1;
+    summaryByPattern.set(key, current);
+  });
+
+  const bestPattern = Array.from(summaryByPattern.values())
+    .sort((left, right) => right.count - left.count || right.maxNumber - left.maxNumber)[0];
+
+  return {
+    prefix: bestPattern.prefix,
+    separator: bestPattern.separator,
+    nextNumber: bestPattern.maxNumber + 1,
+    width: bestPattern.width,
+  };
+}
+
+function getNextOpenItemId() {
+  const pattern = detectOpenItemIdPattern();
+  return `${pattern.prefix}${pattern.separator}${String(pattern.nextNumber).padStart(pattern.width, "0")}`;
+}
+
+function updateNextOpenItemSuggestion(forceValue = false) {
+  const nextId = getNextOpenItemId();
+  nextOpenItemHint.textContent = `Siguiente sugerido: ${nextId}`;
+  openItemIdInput.placeholder = `ID, ej. ${nextId}`;
+  if (forceValue || !String(openItemIdInput.value || "").trim()) {
+    openItemIdInput.value = nextId;
+  }
 }
 
 function formatDateTime(value) {
@@ -183,6 +371,36 @@ function renderReferencePanels() {
         <ul>${DECISION_THRESHOLDS.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
       </article>
     `,
+  ].join("");
+}
+
+function renderGoogleSheetsUserAuthStatus(status = authConfig?.googleSheetsAuth || {}) {
+  const configuredMode = status.configuredMode || "auto";
+  const activeMode = status.mode || "snapshot";
+  const configured = status.userOAuthConfigured ? "Si" : "No";
+  const connected = status.userOAuthConnected ? "Si" : "No";
+  const redirectUri = status.userOAuthRedirectUri || "N/A";
+
+  googleSheetsUserAuthStatus.dataset.mode = activeMode;
+  googleSheetsUserAuthStatus.innerHTML = [
+    `<div><strong>Modo configurado:</strong> ${configuredMode}</div>`,
+    `<div><strong>Modo activo:</strong> ${activeMode}</div>`,
+    `<div><strong>OAuth configurado:</strong> ${configured}</div>`,
+    `<div><strong>Cuenta conectada:</strong> ${connected}</div>`,
+    `<div><strong>Redirect URI:</strong> ${redirectUri}</div>`,
+  ].join("");
+}
+
+function renderEmployeesImportStatus(directory = {}) {
+  const count = Array.isArray(directory.contacts) ? directory.contacts.length : importedContacts.length;
+  const sourceName = directory.sourceName || "Sin archivo importado";
+  const importedAt = directory.importedAt ? formatDateTime(directory.importedAt) : "Nunca";
+
+  employeesImportStatus.dataset.mode = count ? "google-sheet-snapshot" : "local";
+  employeesImportStatus.innerHTML = [
+    `<div><strong>Contactos cargados:</strong> ${count}</div>`,
+    `<div><strong>Archivo:</strong> ${sourceName}</div>`,
+    `<div><strong>Ultima importacion:</strong> ${importedAt}</div>`,
   ].join("");
 }
 
@@ -249,8 +467,11 @@ function renderAreas() {
         <span class="chip">${area.id}</span>
       </div>
       <div class="area-editor-grid">
-        <input data-area-field="owner" data-area-id="${area.id}" placeholder="Owner" value="${area.owner || ""}" />
-        <input data-area-field="email" data-area-id="${area.id}" type="email" placeholder="Email del owner" value="${area.email || ""}" />
+        <div class="autocomplete-shell">
+          <input data-area-field="owner" data-area-id="${area.id}" data-role="owner" placeholder="Owner" value="${area.owner || ""}" autocomplete="off" />
+          <div class="autocomplete-list" data-owner-autocomplete="${area.id}" hidden></div>
+        </div>
+        <input data-area-field="email" data-area-id="${area.id}" data-role="email" list="email-suggestions" type="email" placeholder="Email del owner" value="${area.email || ""}" />
       </div>
     `;
     areasList.appendChild(card);
@@ -275,6 +496,59 @@ function renderAreas() {
         return;
       }
       area[field] = event.currentTarget.value.trim();
+
+      if (field === "owner") {
+        const contact = findContactByName(area.owner);
+        if (contact?.email) {
+          area.email = contact.email;
+          const emailInput = areasList.querySelector(`[data-area-field="email"][data-area-id="${area.id}"]`);
+          if (emailInput) {
+            emailInput.value = contact.email;
+          }
+        }
+
+        const dropdown = areasList.querySelector(`[data-owner-autocomplete="${area.id}"]`);
+        if (dropdown) {
+          renderOwnerAutocomplete(dropdown, area.id, area.owner);
+        }
+      }
+
+      if (field === "email") {
+        const contact = findContactByEmail(area.email);
+        if (contact?.name) {
+          area.owner = contact.name;
+          const ownerInput = areasList.querySelector(`[data-area-field="owner"][data-area-id="${area.id}"]`);
+          if (ownerInput) {
+            ownerInput.value = contact.name;
+          }
+        }
+      }
+    });
+
+    input.addEventListener("focus", (event) => {
+      const field = event.currentTarget.dataset.areaField;
+      const areaId = event.currentTarget.dataset.areaId;
+      if (field !== "owner" || !areaId) {
+        return;
+      }
+      const dropdown = areasList.querySelector(`[data-owner-autocomplete="${areaId}"]`);
+      if (dropdown) {
+        renderOwnerAutocomplete(dropdown, areaId, event.currentTarget.value);
+      }
+    });
+
+    input.addEventListener("blur", (event) => {
+      const field = event.currentTarget.dataset.areaField;
+      const areaId = event.currentTarget.dataset.areaId;
+      if (field !== "owner" || !areaId) {
+        return;
+      }
+      const dropdown = areasList.querySelector(`[data-owner-autocomplete="${areaId}"]`);
+      if (dropdown) {
+        window.setTimeout(() => {
+          dropdown.hidden = true;
+        }, 120);
+      }
     });
   });
 }
@@ -412,9 +686,11 @@ function derivePrerequisiteLocally() {
 function refreshDerivedViews() {
   const prerequisite = derivePrerequisiteLocally();
   renderPrerequisite(prerequisite);
+  renderContactSuggestions();
   renderAreas();
   renderOpenItems();
   renderSourceStatus();
+  updateNextOpenItemSuggestion();
   dailyReport.textContent = buildDailyReportText(prerequisite);
 }
 
@@ -444,6 +720,17 @@ async function loadState() {
   dailyReport.textContent = buildDailyReportText(payload.prerequisite);
 }
 
+async function loadEmployeeDirectory() {
+  const response = await fetch(apiUrl("/api/employees"));
+  if (response.status === 401) {
+    return;
+  }
+  const payload = await parseApiResponse(response, "No se pudo cargar el directorio de empleados.");
+  importedContacts = Array.isArray(payload.contacts) ? payload.contacts : [];
+  renderContactSuggestions();
+  renderEmployeesImportStatus(payload);
+}
+
 function showAuthOnly(message = "") {
   authScreen.style.display = "grid";
   appShell.classList.add("app-hidden");
@@ -454,6 +741,7 @@ function showApp(user) {
   authScreen.style.display = "none";
   appShell.classList.remove("app-hidden");
   currentUser.textContent = user ? `${user.name} · ${user.email}` : "";
+  renderGoogleSheetsUserAuthStatus();
 }
 
 async function loadAuthConfig() {
@@ -493,6 +781,19 @@ async function loadAuthConfig() {
   });
 
   return false;
+}
+
+async function loadGoogleSheetsUserAuthStatus() {
+  const response = await fetch(apiUrl("/api/google-sheets-auth/status"));
+  if (response.status === 401) {
+    return;
+  }
+  const payload = await parseApiResponse(response, "No se pudo consultar el estado de Google Sheets OAuth.");
+  authConfig = {
+    ...(authConfig || {}),
+    googleSheetsAuth: payload,
+  };
+  renderGoogleSheetsUserAuthStatus(payload);
 }
 
 async function handleGoogleCredential(response) {
@@ -552,6 +853,20 @@ async function loadLiveSyncConfig() {
   renderLiveSyncStatus(payload);
 }
 
+function showGoogleSheetsOAuthResultFromQuery() {
+  const url = new URL(window.location.href);
+  const status = url.searchParams.get("googleSheetsAuth");
+  const message = url.searchParams.get("message");
+  if (status && message) {
+    window.alert(message);
+  }
+  if (status) {
+    url.searchParams.delete("googleSheetsAuth");
+    url.searchParams.delete("message");
+    window.history.replaceState({}, document.title, url.toString());
+  }
+}
+
 async function applyImportedPayload(response) {
   const payload = await parseApiResponse(response, "No se pudo sincronizar la informacion.");
   Object.assign(state, payload.state);
@@ -590,6 +905,7 @@ openItemForm.addEventListener("submit", (event) => {
   });
 
   event.currentTarget.reset();
+  updateNextOpenItemSuggestion(true);
   refreshDerivedViews();
 });
 
@@ -598,6 +914,14 @@ document.getElementById("save-state").addEventListener("click", async () => {
     await saveState();
   } catch (error) {
     window.alert(error.message || "No se pudo guardar el estado.");
+  }
+});
+
+document.getElementById("update-owners-button").addEventListener("click", async () => {
+  try {
+    await saveState();
+  } catch (error) {
+    window.alert(error.message || "No se pudieron actualizar los owners.");
   }
 });
 
@@ -663,6 +987,55 @@ document.getElementById("import-csv-button").addEventListener("click", async () 
   csvFileInput.value = "";
 });
 
+document.getElementById("import-employees-csv-button").addEventListener("click", async () => {
+  const file = employeesCsvFileInput.files?.[0];
+  if (!file) {
+    window.alert("Selecciona primero el CSV de empleados.");
+    return;
+  }
+
+  employeesImportStatus.dataset.mode = "local";
+  employeesImportStatus.innerHTML = "<strong>Importando:</strong> leyendo directorio de empleados...";
+
+  try {
+    const csvText = await file.text();
+    const response = await fetch(apiUrl("/api/import/employees-csv"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        csvText,
+        fileName: file.name,
+      }),
+    });
+    const payload = await parseApiResponse(response, "No se pudo importar el CSV de empleados.");
+    importedContacts = Array.isArray(payload.contacts) ? payload.contacts : [];
+    renderContactSuggestions();
+    renderEmployeesImportStatus(payload);
+    renderAreas();
+    employeesCsvFileInput.value = "";
+  } catch (error) {
+    employeesImportStatus.dataset.mode = "local";
+    employeesImportStatus.innerHTML = `<strong>Error:</strong> ${error.message || "No se pudo importar el CSV."}`;
+    window.alert(error.message || "No se pudo importar el CSV de empleados.");
+  }
+});
+
+document.getElementById("clear-employees-button").addEventListener("click", async () => {
+  try {
+    const response = await fetch(apiUrl("/api/employees/clear"), {
+      method: "POST",
+    });
+    const payload = await parseApiResponse(response, "No se pudo limpiar el directorio de empleados.");
+    importedContacts = [];
+    renderContactSuggestions();
+    renderEmployeesImportStatus(payload);
+    renderAreas();
+    employeesCsvFileInput.value = "";
+  } catch (error) {
+    window.alert(error.message || "No se pudo limpiar el directorio de empleados.");
+  }
+});
+
 document.getElementById("save-live-sync").addEventListener("click", async () => {
   try {
     const response = await fetch(apiUrl("/api/live-sync"), {
@@ -707,6 +1080,24 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("connect-google-sheets-user").addEventListener("click", () => {
+  window.location.href = apiUrl("/api/google-sheets-auth/start");
+});
+
+document.getElementById("disconnect-google-sheets-user").addEventListener("click", async () => {
+  try {
+    const response = await fetch(apiUrl("/api/google-sheets-auth/disconnect"), { method: "POST" });
+    const payload = await parseApiResponse(response, "No se pudo desconectar Google Sheets OAuth.");
+    authConfig = {
+      ...(authConfig || {}),
+      googleSheetsAuth: payload.googleSheetsAuth,
+    };
+    renderGoogleSheetsUserAuthStatus(payload.googleSheetsAuth);
+  } catch (error) {
+    window.alert(error.message || "No se pudo desconectar Google Sheets OAuth.");
+  }
+});
+
 document.getElementById("logout-button").addEventListener("click", async () => {
   await fetch(apiUrl("/api/auth/logout"), { method: "POST" });
   showAuthOnly(`Acceso limitado a @${authConfig?.allowedDomain || "conceivable.life"}`);
@@ -715,10 +1106,13 @@ document.getElementById("logout-button").addEventListener("click", async () => {
 
 (async () => {
   try {
+    showGoogleSheetsOAuthResultFromQuery();
     const hasSession = await loadAuthConfig();
     renderReferencePanels();
     activateTab("summary");
     if (hasSession) {
+      await loadEmployeeDirectory();
+      await loadGoogleSheetsUserAuthStatus();
       await loadState();
       await loadLiveSyncConfig();
     }

@@ -12,16 +12,23 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, "data");
 const SOURCE_SPREADSHEET_ID = process.env.SOURCE_SPREADSHEET_ID || "1G6YNnnIrqEH_oIgq95bXmrER2lUjPYtkCeV5zwaXRms";
 const SOURCE_SHEET_NAME = process.env.SOURCE_SHEET_NAME || "Open Item List";
+const SOURCE_SHEET_HEADER_ROW = Number(process.env.SOURCE_SHEET_HEADER_ROW || 0);
 const AREAS_SHEET_NAME = process.env.AREAS_SHEET_NAME || "CCB Areas";
 const VOTES_SHEET_NAME = process.env.VOTES_SHEET_NAME || "CCB Votes";
+const GOOGLE_SHEETS_AUTH_MODE = process.env.GOOGLE_SHEETS_AUTH_MODE || "";
 const GOOGLE_SERVICE_ACCOUNT_KEY_PATH = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || "";
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
+const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+const GOOGLE_OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI || "";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const SEED_FILE = path.join(DATA_DIR, "seed.json");
 const AREA_DIRECTORY_FILE = path.join(DATA_DIR, "area-directory.json");
+const EMPLOYEE_DIRECTORY_FILE = path.join(DATA_DIR, "employee-directory.json");
 const GOOGLE_SNAPSHOT_FILE = path.join(DATA_DIR, "google-open-items-snapshot.json");
 const LIVE_SYNC_CONFIG_FILE = path.join(DATA_DIR, "live-sync-config.json");
 const AUTH_CONFIG_FILE = path.join(DATA_DIR, "auth-config.json");
+const USER_GOOGLE_OAUTH_TOKEN_FILE = path.join(DATA_DIR, "google-user-oauth-token.json");
 const SESSION_COOKIE_NAME = "ccb_session";
 const OPEN_ITEM_HEADERS = [
   "ID",
@@ -50,6 +57,7 @@ const OPEN_ITEM_HEADERS = [
 ];
 const AREA_HEADERS = ["id", "name", "owner", "email", "sourceColumn"];
 const VOTE_HEADERS = ["openItemId", "areaId", "decision", "comment", "createdAt"];
+const GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -144,6 +152,12 @@ function readOptionalJson(filePath, fallback) {
   return readJson(filePath);
 }
 
+function deleteIfExists(filePath) {
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
+
 function ensureStateFile() {
   ensureDataDir();
 
@@ -182,6 +196,35 @@ async function persistStateStore(nextState) {
 function getAreaDirectory() {
   const payload = readOptionalJson(AREA_DIRECTORY_FILE, { areas: [] });
   return Array.isArray(payload.areas) ? payload.areas : [];
+}
+
+function getEmployeeDirectory() {
+  const payload = readOptionalJson(EMPLOYEE_DIRECTORY_FILE, {
+    importedAt: "",
+    sourceName: "",
+    contacts: [],
+  });
+
+  return {
+    importedAt: payload.importedAt || "",
+    sourceName: payload.sourceName || "",
+    contacts: Array.isArray(payload.contacts) ? payload.contacts : [],
+  };
+}
+
+function persistEmployeeDirectory(directory) {
+  const nextDirectory = {
+    importedAt: directory.importedAt || new Date().toISOString(),
+    sourceName: directory.sourceName || "",
+    contacts: Array.isArray(directory.contacts) ? directory.contacts : [],
+  };
+  writeJson(EMPLOYEE_DIRECTORY_FILE, nextDirectory);
+  return nextDirectory;
+}
+
+function clearEmployeeDirectory() {
+  deleteIfExists(EMPLOYEE_DIRECTORY_FILE);
+  return getEmployeeDirectory();
 }
 
 function normalizeStatus(value) {
@@ -248,6 +291,74 @@ function loadAuthConfig() {
     allowedDomain: process.env.ALLOWED_GOOGLE_DOMAIN || fileConfig.allowedDomain || "conceivable.life",
     appBaseUrl: process.env.APP_BASE_URL || fileConfig.appBaseUrl || "",
   };
+}
+
+function loadGoogleSheetsOAuthConfig() {
+  return {
+    mode: GOOGLE_SHEETS_AUTH_MODE || "",
+    clientId: GOOGLE_OAUTH_CLIENT_ID,
+    clientSecret: GOOGLE_OAUTH_CLIENT_SECRET,
+    redirectUri: GOOGLE_OAUTH_REDIRECT_URI,
+  };
+}
+
+function loadUserGoogleOAuthToken() {
+  return readOptionalJson(USER_GOOGLE_OAUTH_TOKEN_FILE, null);
+}
+
+function persistUserGoogleOAuthToken(tokens) {
+  writeJson(USER_GOOGLE_OAUTH_TOKEN_FILE, tokens);
+}
+
+function isUserGoogleOAuthConfigured() {
+  const config = loadGoogleSheetsOAuthConfig();
+  return Boolean(config.clientId && config.clientSecret && config.redirectUri);
+}
+
+function isUserGoogleOAuthConnected() {
+  const token = loadUserGoogleOAuthToken();
+  return Boolean(token?.refresh_token || token?.access_token);
+}
+
+function getGoogleSheetsStorageMode() {
+  const explicitMode = String(GOOGLE_SHEETS_AUTH_MODE || "").trim().toLowerCase();
+  if (explicitMode === "snapshot" || explicitMode === "none" || explicitMode === "local") {
+    return "snapshot";
+  }
+  if (explicitMode === "user-oauth") {
+    return isUserGoogleOAuthConnected() ? "user-oauth" : "snapshot";
+  }
+  if (explicitMode === "service-account") {
+    return loadServiceAccountCredentials() ? "service-account" : "snapshot";
+  }
+  if (loadServiceAccountCredentials()) {
+    return "service-account";
+  }
+  if (isUserGoogleOAuthConnected()) {
+    return "user-oauth";
+  }
+  return "snapshot";
+}
+
+function createUserGoogleOAuthClient() {
+  const config = loadGoogleSheetsOAuthConfig();
+  if (!config.clientId || !config.clientSecret || !config.redirectUri) {
+    throw new Error("Google OAuth de usuario no configurado");
+  }
+
+  const client = new OAuth2Client(config.clientId, config.clientSecret, config.redirectUri);
+  const tokens = loadUserGoogleOAuthToken();
+  if (tokens) {
+    client.setCredentials(tokens);
+  }
+  client.on("tokens", (nextTokens) => {
+    const mergedTokens = {
+      ...(loadUserGoogleOAuthToken() || {}),
+      ...nextTokens,
+    };
+    persistUserGoogleOAuthToken(mergedTokens);
+  });
+  return client;
 }
 
 function persistLiveSyncConfig(config) {
@@ -343,6 +454,10 @@ function requiresAuth(pathname) {
     return false;
   }
 
+  if (pathname === "/api/google-sheets-auth/callback") {
+    return false;
+  }
+
   if (!pathname.startsWith("/api/")) {
     return false;
   }
@@ -399,6 +514,37 @@ async function verifyGoogleCredential(credential) {
     picture: payload.picture || "",
     hd: payload.hd,
   };
+}
+
+function getGoogleSheetsAuthStatus() {
+  const oauthConfig = loadGoogleSheetsOAuthConfig();
+  return {
+    mode: getGoogleSheetsStorageMode(),
+    configuredMode: oauthConfig.mode || "auto",
+    userOAuthConfigured: isUserGoogleOAuthConfigured(),
+    userOAuthConnected: isUserGoogleOAuthConnected(),
+    userOAuthRedirectUri: oauthConfig.redirectUri || "",
+  };
+}
+
+function createGoogleSheetsOAuthState(request) {
+  const user = getCurrentUser(request);
+  const payload = {
+    nonce: crypto.randomBytes(12).toString("hex"),
+    exp: Date.now() + (10 * 60 * 1000),
+    userEmail: user?.email || "",
+  };
+  return encodeSessionCookie(payload);
+}
+
+function decodeGoogleSheetsOAuthState(value) {
+  return decodeSessionCookie(value);
+}
+
+function redirectToApp(response, status, message = "") {
+  const location = `${withBasePath("/")}${message ? `?googleSheetsAuth=${encodeURIComponent(status)}&message=${encodeURIComponent(message)}` : `?googleSheetsAuth=${encodeURIComponent(status)}`}`;
+  response.writeHead(302, { Location: location });
+  response.end();
 }
 
 function mapSnapshotToState(snapshot, existingState = null, areasOverride = null, votesOverride = null) {
@@ -682,6 +828,96 @@ function buildSnapshotFromCsv(csvText, spreadsheetTitle = "Imported Open Item Li
   return snapshot;
 }
 
+function toDisplayName(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.includes("...")) {
+    return normalized;
+  }
+
+  return normalized
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+    .join(" ");
+}
+
+function findEmployeeEmailColumnIndex(headerRow) {
+  const normalizedHeaders = headerRow.map((header) => String(header || "").trim().toLowerCase());
+  const preferredHeaders = ["email", "email address", "primary email", "correo", "correo electronico"];
+
+  for (const headerName of preferredHeaders) {
+    const index = normalizedHeaders.findIndex((header) => header === headerName);
+    if (index >= 0) {
+      return index;
+    }
+  }
+
+  return normalizedHeaders.findIndex((header) =>
+    header.includes("email") &&
+      header !== "email status" &&
+      header !== "email preference",
+  );
+}
+
+function isEmployeeDirectoryHeaderRow(row) {
+  const normalizedHeaders = row.map((header) => String(header || "").trim().toLowerCase());
+  return normalizedHeaders.includes("email address") || normalizedHeaders.includes("nickname");
+}
+
+function buildEmployeeDirectoryFromCsv(csvText, sourceName = "Imported employee CSV") {
+  const rows = parseCsv(csvText);
+  if (rows.length < 2) {
+    throw new Error("CSV de empleados vacio o incompleto");
+  }
+
+  const headerIndex = rows.findIndex((row) => isEmployeeDirectoryHeaderRow(row));
+
+  if (headerIndex === -1) {
+    throw new Error("No encontre la fila de encabezados del CSV de empleados.");
+  }
+
+  const headerRow = rows[headerIndex];
+  const bodyRows = rows.slice(headerIndex + 1);
+  const emailIndex = findEmployeeEmailColumnIndex(headerRow);
+  if (emailIndex === -1) {
+    throw new Error("No encontre una columna de correo real en el CSV. Debe existir una columna como Email o Email Address.");
+  }
+
+  const contacts = [];
+  const seen = new Set();
+
+  bodyRows.forEach((row) => {
+    const email = String(row[emailIndex] || "").trim().toLowerCase();
+    if (!email) {
+      return;
+    }
+
+    if (seen.has(email)) {
+      return;
+    }
+
+    seen.add(email);
+    contacts.push({
+      name: toDisplayName(email.split("@")[0] || email),
+      email,
+    });
+  });
+
+  if (!contacts.length) {
+    throw new Error("El CSV no contiene correos utilizables en la columna seleccionada.");
+  }
+
+  return persistEmployeeDirectory({
+    importedAt: new Date().toISOString(),
+    sourceName,
+    contacts,
+  });
+}
+
 function buildSnapshotFromJson(payload) {
   if (!payload || !Array.isArray(payload.rows)) {
     throw new Error("JSON invalido para live sync");
@@ -707,7 +943,7 @@ async function importSnapshotIntoState(snapshot) {
 }
 
 function isGoogleSheetsStorageEnabled() {
-  return Boolean(loadServiceAccountCredentials());
+  return getGoogleSheetsStorageMode() !== "snapshot";
 }
 
 function chunkRows(rows, size = 500) {
@@ -750,6 +986,68 @@ function normalizeSheetRangeName(rangeValue) {
     .split("!")[0]
     .replace(/^'/, "")
     .replace(/'$/, "");
+}
+
+function findOpenItemHeaderRowIndex(values) {
+  const hasRequiredHeaders = (row) => {
+    const normalized = row.map((cell) => String(cell || "").trim());
+    return normalized.includes("ID") && normalized.includes("Open Item Description");
+  };
+
+  if (SOURCE_SHEET_HEADER_ROW > 0) {
+    const configuredIndex = Math.max(0, SOURCE_SHEET_HEADER_ROW - 1);
+    if (values[configuredIndex] && hasRequiredHeaders(values[configuredIndex])) {
+      return configuredIndex;
+    }
+  }
+
+  return values.findIndex((row) => hasRequiredHeaders(row));
+}
+
+function getOpenItemSheetContext(values) {
+  const headerRowIndex = findOpenItemHeaderRowIndex(values);
+  if (headerRowIndex < 0 || !values[headerRowIndex]) {
+    throw new Error(`No se pudo detectar la fila de encabezados de ${SOURCE_SHEET_NAME}. Restaura la hoja para que vuelva a contener una fila con 'ID' y 'Open Item Description'.`);
+  }
+
+  const headerRow = values[headerRowIndex].map((cell) => String(cell || "").trim());
+  return {
+    headerRowIndex,
+    headerRowNumber: headerRowIndex + 1,
+    headerRow,
+    bodyRows: values.slice(headerRowIndex + 1),
+  };
+}
+
+function formatMexicoCityDateTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+
+  const formatter = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "America/Mexico_City",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  const parts = Object.fromEntries(
+    formatter
+      .formatToParts(parsed)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }
 
 function buildOpenItemHeaders(state, areas) {
@@ -809,6 +1107,7 @@ function parseVotesSheetRows(values) {
 function buildOpenItemsRowsFromState(state, areas) {
   const areaColumns = areas.filter((area) => area.sourceColumn);
   const headers = buildOpenItemHeaders(state, areas);
+  const checkboxHeaders = new Set(areaColumns.map((area) => area.sourceColumn));
 
   return state.openItems.map((item) => {
     const baseRow = item.rawSheetRow && typeof item.rawSheetRow === "object"
@@ -819,8 +1118,8 @@ function buildOpenItemsRowsFromState(state, areas) {
     baseRow.ID = item.id || "";
     baseRow["Open Item Description"] = item.title || "";
     baseRow.Owner = item.ownerName || "";
-    baseRow["Date Created"] = item.createdAt || "";
-    baseRow["Due Date"] = item.dueDate || "";
+    baseRow["Date Created"] = formatMexicoCityDateTime(item.createdAt || baseRow["Date Created"] || "");
+    baseRow["Due Date"] = formatMexicoCityDateTime(item.dueDate || baseRow["Due Date"] || "");
     baseRow.Status = item.status || "open";
     baseRow["Comments/Updates"] = item.description || "";
     baseRow["Minutes Related"] = baseRow["Minutes Related"] || "";
@@ -830,10 +1129,15 @@ function buildOpenItemsRowsFromState(state, areas) {
     baseRow["CCB Status"] = item.externalStatus || (item.isSubstantial ? "REVIEW" : "No Localized");
 
     areaColumns.forEach((area) => {
-      baseRow[area.sourceColumn] = impactedAreaIds.has(area.id) ? "TRUE" : "FALSE";
+      baseRow[area.sourceColumn] = impactedAreaIds.has(area.id);
     });
 
-    return headers.map((header) => String(baseRow[header] || "").trim());
+    return headers.map((header) => {
+      if (checkboxHeaders.has(header)) {
+        return Boolean(baseRow[header]);
+      }
+      return String(baseRow[header] || "").trim();
+    });
   });
 }
 
@@ -874,25 +1178,48 @@ function loadServiceAccountCredentials() {
 }
 
 function getGoogleSheetsJwtClient() {
+  const storageMode = getGoogleSheetsStorageMode();
+  if (storageMode === "user-oauth") {
+    return createUserGoogleOAuthClient();
+  }
+
   const credentials = loadServiceAccountCredentials();
   if (!credentials?.client_email || !credentials?.private_key) {
-    throw new Error("Google Sheets API no configurada: falta service account");
+    throw new Error("Google Sheets API no configurada");
   }
 
   return new JWT({
     email: credentials.client_email,
     key: credentials.private_key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    scopes: GOOGLE_SHEETS_SCOPES,
   });
 }
 
-async function fetchGoogleSheetsJson(url) {
+async function getGoogleRequestHeaders(url) {
   const client = getGoogleSheetsJwtClient();
-  const headers = await client.getRequestHeaders(url);
+  if (getGoogleSheetsStorageMode() === "user-oauth") {
+    const accessTokenResponse = await client.getAccessToken();
+    const accessToken = typeof accessTokenResponse === "string"
+      ? accessTokenResponse
+      : accessTokenResponse?.token;
+    if (!accessToken) {
+      throw new Error("No se pudo obtener access token de Google OAuth.");
+    }
+    return {
+      Authorization: `Bearer ${accessToken}`,
+    };
+  }
+
+  return client.getRequestHeaders(url);
+}
+
+async function fetchGoogleSheetsJson(url) {
+  const headers = await getGoogleRequestHeaders(url);
   const response = await fetch(url, { headers });
 
   if (!response.ok) {
-    throw new Error(`Google Sheets API error ${response.status}`);
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Google Sheets API error ${response.status}${detail ? `: ${detail}` : ""}`);
   }
 
   return response.json();
@@ -917,8 +1244,9 @@ async function fetchSnapshotFromGoogleSheetsApi() {
     throw new Error(`La hoja ${SOURCE_SHEET_NAME} no tiene datos`);
   }
 
-  const headerRow = values[0];
-  const bodyRows = values.slice(1);
+  const context = getOpenItemSheetContext(values);
+  const headerRow = context.headerRow;
+  const bodyRows = context.bodyRows;
   const columnIndexes = new Map(headerRow.map((header, index) => [header, index]));
   const getValue = (row, header) => row[columnIndexes.get(header)] || "";
   const matchedSheet = Array.isArray(metadata.sheets)
@@ -931,6 +1259,7 @@ async function fetchSnapshotFromGoogleSheetsApi() {
     sheetName: SOURCE_SHEET_NAME,
     sourceType: "google-sheets",
     sheetGid: matchedSheet?.properties?.sheetId ?? null,
+    headerRowNumber: context.headerRowNumber,
     importedAt: new Date().toISOString(),
     headers: headerRow,
     rows: bodyRows.map((row) => ({
@@ -1007,9 +1336,8 @@ async function ensureSpreadsheetSheets(sheetNames) {
     return metadata;
   }
 
-  const client = getGoogleSheetsJwtClient();
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}:batchUpdate`;
-  const headers = await client.getRequestHeaders(url);
+  const headers = await getGoogleRequestHeaders(url);
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -1020,18 +1348,18 @@ async function ensureSpreadsheetSheets(sheetNames) {
   });
 
   if (!response.ok) {
-    throw new Error(`Google Sheets batchUpdate error ${response.status}`);
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Google Sheets batchUpdate error ${response.status}${detail ? `: ${detail}` : ""}`);
   }
 
   return fetchSpreadsheetMetadata();
 }
 
 async function clearAndWriteSheet(sheetName, rows) {
-  const client = getGoogleSheetsJwtClient();
   const clearUrl =
     `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
     `/values/${encodeURIComponent(sheetName)}:clear`;
-  const clearHeaders = await client.getRequestHeaders(clearUrl);
+  const clearHeaders = await getGoogleRequestHeaders(clearUrl);
   const clearResponse = await fetch(clearUrl, {
     method: "POST",
     headers: {
@@ -1042,7 +1370,8 @@ async function clearAndWriteSheet(sheetName, rows) {
   });
 
   if (!clearResponse.ok) {
-    throw new Error(`Google Sheets clear error ${clearResponse.status}`);
+    const detail = await clearResponse.text().catch(() => "");
+    throw new Error(`Google Sheets clear error ${clearResponse.status}${detail ? `: ${detail}` : ""}`);
   }
 
   if (!rows.length) {
@@ -1054,7 +1383,7 @@ async function clearAndWriteSheet(sheetName, rows) {
   const updateUrl =
     `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
     `/values/${encodeURIComponent(targetRange)}?valueInputOption=RAW`;
-  const updateHeaders = await client.getRequestHeaders(updateUrl);
+  const updateHeaders = await getGoogleRequestHeaders(updateUrl);
   const updateResponse = await fetch(updateUrl, {
     method: "PUT",
     headers: {
@@ -1069,8 +1398,147 @@ async function clearAndWriteSheet(sheetName, rows) {
   });
 
   if (!updateResponse.ok) {
-    throw new Error(`Google Sheets update error ${updateResponse.status}`);
+    const detail = await updateResponse.text().catch(() => "");
+    throw new Error(`Google Sheets update error ${updateResponse.status}${detail ? `: ${detail}` : ""}`);
   }
+}
+
+async function clearSheetRange(sheetRange) {
+  const clearUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
+    `/values/${encodeURIComponent(sheetRange)}:clear`;
+  const clearHeaders = await getGoogleRequestHeaders(clearUrl);
+  const clearResponse = await fetch(clearUrl, {
+    method: "POST",
+    headers: {
+      ...clearHeaders,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+
+  if (!clearResponse.ok) {
+    const detail = await clearResponse.text().catch(() => "");
+    throw new Error(`Google Sheets clear error ${clearResponse.status}${detail ? `: ${detail}` : ""}`);
+  }
+}
+
+async function writeSheetRange(sheetRange, rows) {
+  const updateUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
+    `/values/${encodeURIComponent(sheetRange)}?valueInputOption=RAW`;
+  const updateHeaders = await getGoogleRequestHeaders(updateUrl);
+  const updateResponse = await fetch(updateUrl, {
+    method: "PUT",
+    headers: {
+      ...updateHeaders,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      range: sheetRange,
+      majorDimension: "ROWS",
+      values: rows,
+    }),
+  });
+
+  if (!updateResponse.ok) {
+    const detail = await updateResponse.text().catch(() => "");
+    throw new Error(`Google Sheets update error ${updateResponse.status}${detail ? `: ${detail}` : ""}`);
+  }
+}
+
+async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, endRow) {
+  if (!sheetId || endRow < startRow) {
+    return;
+  }
+
+  const checkboxColumns = [
+    "Software",
+    "Product",
+    "Quality",
+    "Machine",
+    "Testing",
+    "Infra",
+    "Optics",
+    "Data",
+    "Research",
+    "Exploration",
+    "Mecha",
+  ];
+
+  const requests = checkboxColumns
+    .map((header) => ({
+      header,
+      index: headerRow.findIndex((value) => String(value || "").trim() === header),
+    }))
+    .filter((entry) => entry.index >= 0)
+    .map((entry) => ({
+      setDataValidation: {
+        range: {
+          sheetId,
+          startRowIndex: startRow - 1,
+          endRowIndex: endRow,
+          startColumnIndex: entry.index,
+          endColumnIndex: entry.index + 1,
+        },
+        rule: {
+          condition: {
+            type: "BOOLEAN",
+          },
+          strict: true,
+          showCustomUi: true,
+        },
+      },
+    }));
+
+  if (!requests.length) {
+    return;
+  }
+
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}:batchUpdate`;
+  const headers = await getGoogleRequestHeaders(url);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ requests }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Google Sheets batchUpdate error ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+}
+
+async function writeOpenItemsSheetPreservingTemplate(rows) {
+  const [valuesMap, metadata] = await Promise.all([
+    batchGetSpreadsheetValues([SOURCE_SHEET_NAME]),
+    fetchSpreadsheetMetadata(),
+  ]);
+  const existingValues = valuesMap.get(SOURCE_SHEET_NAME) || [];
+  const context = getOpenItemSheetContext(existingValues);
+  const matchedSheet = Array.isArray(metadata.sheets)
+    ? metadata.sheets.find((sheet) => sheet.properties?.title === SOURCE_SHEET_NAME)
+    : null;
+  const sheetId = matchedSheet?.properties?.sheetId ?? null;
+  const headerWidth = Math.max(context.headerRow.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
+  const existingDataRowCount = Math.max(0, existingValues.length - context.headerRowNumber);
+  const targetRowCount = Math.max(existingDataRowCount, rows.length, 1);
+  const startRow = context.headerRowNumber + 1;
+  const endRow = startRow + targetRowCount - 1;
+  const endColumn = toA1Column(Math.max(0, headerWidth - 1));
+  const clearRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${endRow}`;
+
+  await clearSheetRange(clearRange);
+
+  if (rows.length) {
+    const writeRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${startRow + rows.length - 1}`;
+    await writeSheetRange(writeRange, rows);
+  }
+
+  await applyOpenItemsCheckboxValidation(sheetId, context.headerRow, startRow, endRow);
 }
 
 async function loadStateFromGoogleSheets() {
@@ -1089,6 +1557,7 @@ async function loadStateFromGoogleSheets() {
   const openItemValues = valueMap.get(SOURCE_SHEET_NAME) || [];
   const areaValues = valueMap.get(AREAS_SHEET_NAME) || [];
   const voteValues = valueMap.get(VOTES_SHEET_NAME) || [];
+  const openItemContext = getOpenItemSheetContext(openItemValues);
   const areas = parseAreasSheetRows(areaValues);
   const votesMap = parseVotesSheetRows(voteValues);
   const effectiveAreas = areas.length ? areas : getAreaDirectory();
@@ -1098,8 +1567,9 @@ async function loadStateFromGoogleSheets() {
     sheetName: SOURCE_SHEET_NAME,
     sourceType: "google-sheets",
     importedAt: new Date().toISOString(),
-    headers: openItemValues[0] || OPEN_ITEM_HEADERS,
-    rows: buildSheetValuesMap(openItemValues).map((record) => ({
+    headers: openItemContext.headerRow || OPEN_ITEM_HEADERS,
+    headerRowNumber: openItemContext.headerRowNumber,
+    rows: buildSheetValuesMap([openItemContext.headerRow, ...openItemContext.bodyRows]).map((record) => ({
       id: record.ID || "",
       description: record["Open Item Description"] || "",
       owner: record.Owner || "",
@@ -1154,11 +1624,8 @@ async function persistStateToGoogleSheets(nextState) {
   const voteRows = buildVotesSheetRows(normalizedState);
 
   await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME]);
+  await writeOpenItemsSheetPreservingTemplate(openItemRows);
   await Promise.all([
-    clearAndWriteSheet(SOURCE_SHEET_NAME, [
-      headers,
-      ...openItemRows,
-    ]),
     clearAndWriteSheet(AREAS_SHEET_NAME, areaRows),
     clearAndWriteSheet(VOTES_SHEET_NAME, voteRows),
   ]);
@@ -1339,6 +1806,35 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && pathname === "/api/google-sheets-auth/callback") {
+      const oauthState = decodeGoogleSheetsOAuthState(String(url.searchParams.get("state") || ""));
+      if (!oauthState || !oauthState.exp || Date.now() > oauthState.exp) {
+        redirectToApp(response, "error", "Estado OAuth invalido o expirado.");
+        return;
+      }
+
+      if (url.searchParams.get("error")) {
+        redirectToApp(response, "error", String(url.searchParams.get("error_description") || url.searchParams.get("error") || "Google rechazo la autorizacion."));
+        return;
+      }
+
+      const code = String(url.searchParams.get("code") || "");
+      if (!code) {
+        redirectToApp(response, "error", "Google no devolvio codigo de autorizacion.");
+        return;
+      }
+
+      const client = createUserGoogleOAuthClient();
+      const { tokens } = await client.getToken(code);
+      const existingTokens = loadUserGoogleOAuthToken() || {};
+      persistUserGoogleOAuthToken({
+        ...existingTokens,
+        ...tokens,
+      });
+      redirectToApp(response, "success", "Conexion con Google Sheets lista.");
+      return;
+    }
+
     if (requiresAuth(pathname) && !getCurrentUser(request)) {
       sendJson(response, 401, {
         error: "Unauthorized",
@@ -1355,6 +1851,7 @@ const server = http.createServer(async (request, response) => {
         allowedDomain: authConfig.allowedDomain,
         appBaseUrl: authConfig.appBaseUrl || withBasePath(""),
         user: getCurrentUser(request),
+        googleSheetsAuth: getGoogleSheetsAuthStatus(),
       });
       return;
     }
@@ -1380,12 +1877,61 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && pathname === "/api/google-sheets-auth/status") {
+      sendJson(response, 200, getGoogleSheetsAuthStatus());
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/google-sheets-auth/start") {
+      if (!isUserGoogleOAuthConfigured()) {
+        sendJson(response, 400, {
+          error: "Google user OAuth not configured",
+          detail: "Faltan GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET o GOOGLE_OAUTH_REDIRECT_URI.",
+        });
+        return;
+      }
+
+      const client = createUserGoogleOAuthClient();
+      const authUrl = client.generateAuthUrl({
+        access_type: "offline",
+        prompt: "consent",
+        include_granted_scopes: true,
+        scope: GOOGLE_SHEETS_SCOPES,
+        state: createGoogleSheetsOAuthState(request),
+      });
+      response.writeHead(302, { Location: authUrl });
+      response.end();
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/google-sheets-auth/disconnect") {
+      deleteIfExists(USER_GOOGLE_OAUTH_TOKEN_FILE);
+      sendJson(response, 200, {
+        ok: true,
+        googleSheetsAuth: getGoogleSheetsAuthStatus(),
+      });
+      return;
+    }
+
     if (request.method === "GET" && pathname === "/api/state") {
       const state = await loadStateStore();
       sendJson(response, 200, {
         state,
         prerequisite: derivePrerequisiteStatus(state),
         dailyReport: buildDailyReport(state),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/employees") {
+      sendJson(response, 200, getEmployeeDirectory());
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/employees/clear") {
+      sendJson(response, 200, {
+        ok: true,
+        ...clearEmployeeDirectory(),
       });
       return;
     }
@@ -1417,7 +1963,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && pathname === "/api/import/google-sheet-snapshot") {
-      const snapshot = loadServiceAccountCredentials()
+      const snapshot = isGoogleSheetsStorageEnabled()
         ? await fetchSnapshotFromGoogleSheetsApi()
         : loadGoogleSnapshot();
       const currentState = await loadStateStore();
@@ -1438,6 +1984,19 @@ const server = http.createServer(async (request, response) => {
         state: nextState,
         prerequisite: derivePrerequisiteStatus(nextState),
         dailyReport: buildDailyReport(nextState),
+      });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/import/employees-csv") {
+      const body = await parseBody(request);
+      const directory = buildEmployeeDirectoryFromCsv(body.csvText, body.fileName);
+      sendJson(response, 200, {
+        ok: true,
+        importedAt: directory.importedAt,
+        sourceName: directory.sourceName,
+        contactCount: directory.contacts.length,
+        contacts: directory.contacts,
       });
       return;
     }

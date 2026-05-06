@@ -52,13 +52,20 @@
               <div class="section-heading">
                 <h2>Owners por area</h2>
                 <div class="button-row">
+                  <button id="update-owners-button" class="secondary">Actualizar owners</button>
                   <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
                   <button id="export-state" class="secondary">Exportar JSON</button>
                 </div>
               </div>
               <p class="meta-line">
-                Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong> y luego usa <strong>Guardar cambios</strong>.
+                Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong> y luego usa <strong>Actualizar owners</strong>.
               </p>
+              <div class="button-row">
+                <input id="employees-csv-file-input" type="file" accept=".csv,text/csv" />
+                <button id="import-employees-csv-button" class="secondary">Importar empleados CSV</button>
+                <button id="clear-employees-button" class="secondary">Limpiar empleados</button>
+              </div>
+              <div id="employees-import-status" class="source-status"></div>
               <div id="areas-list" class="area-editor-list"></div>
             </div>
 
@@ -86,7 +93,8 @@
               </div>
             </div>
             <form id="open-item-form" class="grid-form">
-              <input name="id" placeholder="ID, ej. OI-003" required />
+              <input id="open-item-id-input" name="id" placeholder="ID, ej. OI_003" required />
+              <p id="next-open-item-hint" class="meta-line form-hint"></p>
               <input name="title" placeholder="Titulo" required />
               <input name="sourceRef" placeholder="Referencia fuente" />
               <select name="ownerAreaId" id="owner-area-select" required></select>
@@ -117,6 +125,20 @@
         </section>
 
         <section class="tab-panel" data-tab-panel="sources">
+          <section class="panel">
+            <div class="section-heading">
+              <h2>Google Sheets con tu cuenta</h2>
+              <div class="button-row">
+                <button id="connect-google-sheets-user" class="secondary">Conectar cuenta</button>
+                <button id="disconnect-google-sheets-user" class="secondary">Desconectar</button>
+              </div>
+            </div>
+            <p class="meta-line">
+              Modo temporal para usar OAuth de usuario en lugar de service account. Requiere un client secret web y un redirect URI autorizado.
+            </p>
+            <div id="google-sheets-user-auth-status" class="source-status"></div>
+          </section>
+
           <section class="panel">
             <div class="section-heading">
               <h2>Live Sync</h2>
@@ -173,6 +195,9 @@
           </section>
         </section>
       </section>
+
+      <datalist id="owner-suggestions"></datalist>
+      <datalist id="email-suggestions"></datalist>
 
       <template id="open-item-template">
         <article class="open-item-card">
