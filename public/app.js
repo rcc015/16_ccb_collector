@@ -29,6 +29,11 @@ const currentUser = document.getElementById("current-user");
 const sourceStatus = document.getElementById("source-status");
 const employeesImportStatus = document.getElementById("employees-import-status");
 const googleSheetsUserAuthStatus = document.getElementById("google-sheets-user-auth-status");
+const preSessionOwnerSummary = document.getElementById("presession-owner-summary");
+const preSessionPendingList = document.getElementById("presession-pending-list");
+const preSessionAnsweredList = document.getElementById("presession-answered-list");
+const preSessionJobSummary = document.getElementById("presession-job-summary");
+const preSessionJobStatus = document.getElementById("presession-job-status");
 const guidelineList = document.getElementById("guideline-list");
 const decisionFramework = document.getElementById("decision-framework");
 const ownerSuggestions = document.getElementById("owner-suggestions");
@@ -111,6 +116,7 @@ const DECISION_THRESHOLDS = [
 
 let authConfig = null;
 let importedContacts = [];
+let preSessionDashboard = null;
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
 
 function apiUrl(path) {
@@ -324,6 +330,15 @@ function formatDateTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function renderSourceStatus() {
   const source = state.source || {};
   const sourceType = source.type || "local";
@@ -402,6 +417,106 @@ function renderEmployeesImportStatus(directory = {}) {
     `<div><strong>Archivo:</strong> ${sourceName}</div>`,
     `<div><strong>Ultima importacion:</strong> ${importedAt}</div>`,
   ].join("");
+}
+
+function renderPreSessionDashboard() {
+  const ownerView = preSessionDashboard?.ownerView || { ownedAreas: [], pendingItems: [], answeredItems: [] };
+  const ownerQueue = Array.isArray(preSessionDashboard?.ownerQueue) ? preSessionDashboard.ownerQueue : [];
+  const gmailDeliveryAvailable = Boolean(preSessionDashboard?.gmailDeliveryAvailable);
+  const ownedAreas = ownerView.ownedAreas || [];
+  const pendingItems = ownerView.pendingItems || [];
+  const answeredItems = ownerView.answeredItems || [];
+
+  preSessionOwnerSummary.dataset.mode = ownedAreas.length ? "google-sheet-snapshot" : "local";
+  preSessionOwnerSummary.innerHTML = ownedAreas.length
+    ? [
+        `<div><strong>Areas detectadas:</strong> ${ownedAreas.map((area) => escapeHtml(area.name)).join(", ")}</div>`,
+        `<div><strong>Pendientes:</strong> ${pendingItems.length}</div>`,
+        `<div><strong>Respondidos:</strong> ${answeredItems.length}</div>`,
+      ].join("")
+    : "<div><strong>No encontramos areas</strong> asociadas a tu correo en CCB Areas.</div>";
+
+  preSessionPendingList.innerHTML = pendingItems.length
+    ? pendingItems.map((item) => `
+        <article class="presession-card">
+          <div class="presession-card-top">
+            <div>
+              <p class="presession-eyebrow">${escapeHtml(item.areaName)}</p>
+              <h3>${escapeHtml(item.openItemId)} · ${escapeHtml(item.title)}</h3>
+            </div>
+            <span class="badge">${escapeHtml(item.externalStatus || item.itemStatus || "pending")}</span>
+          </div>
+          <p>${escapeHtml(item.description || "Sin descripcion")}</p>
+          <p class="meta-line">Open item nuevo o pendiente para tu area. ${item.requestedAt ? `Solicitado: ${escapeHtml(formatDateTime(item.requestedAt))}.` : "Aun no se ha enviado solicitud."}</p>
+          <textarea data-presession-comment data-open-item-id="${escapeHtml(item.openItemId)}" data-area-id="${escapeHtml(item.areaId)}" rows="3" placeholder="Comentario opcional para tu revision"></textarea>
+          <div class="decision-row">
+            <button type="button" data-presession-respond data-decision="impact" data-open-item-id="${escapeHtml(item.openItemId)}" data-area-id="${escapeHtml(item.areaId)}">Si impacta</button>
+            <button type="button" class="secondary" data-presession-respond data-decision="no-impact" data-open-item-id="${escapeHtml(item.openItemId)}" data-area-id="${escapeHtml(item.areaId)}">No impacta</button>
+          </div>
+        </article>
+      `).join("")
+    : "<p class=\"meta-line\">No tienes open items pendientes por responder.</p>";
+
+  preSessionAnsweredList.innerHTML = answeredItems.length
+    ? answeredItems.map((item) => `
+        <article class="presession-card">
+          <div class="presession-card-top">
+            <div>
+              <p class="presession-eyebrow">${escapeHtml(item.areaName)}</p>
+              <h3>${escapeHtml(item.openItemId)} · ${escapeHtml(item.title)}</h3>
+            </div>
+            <span class="decision-pill" data-decision="${escapeHtml(item.decision)}">${item.decision === "impact" ? "Si impacta" : "No impacta"}</span>
+          </div>
+          <p class="meta-line">Respondido: ${escapeHtml(formatDateTime(item.respondedAt))}</p>
+          <p>${escapeHtml(item.comment || "Sin comentario")}</p>
+        </article>
+      `).join("")
+    : "<p class=\"meta-line\">Todavia no has respondido revisiones.</p>";
+
+  preSessionJobSummary.dataset.mode = gmailDeliveryAvailable ? "google-sheets" : "local";
+  preSessionJobSummary.innerHTML = [
+    `<div><strong>Owners pendientes:</strong> ${ownerQueue.length}</div>`,
+    `<div><strong>Open items sin respuesta:</strong> ${ownerQueue.reduce((total, owner) => total + Number(owner.pendingCount || 0), 0)}</div>`,
+    `<div><strong>Envio Gmail:</strong> ${gmailDeliveryAvailable ? "Disponible con tu OAuth conectado" : "No disponible, el job generara preview si falta autorizacion"}</div>`,
+  ].join("");
+
+  if (!preSessionJobStatus.textContent.trim()) {
+    preSessionJobStatus.textContent = ownerQueue.length
+      ? ownerQueue.map((owner) => `- ${owner.ownerEmail}: ${owner.pendingCount} pendiente(s)`).join("\n")
+      : "No hay owners con solicitudes pendientes.";
+  }
+
+  preSessionPendingList.querySelectorAll("[data-presession-respond]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const openItemId = button.dataset.openItemId;
+      const areaId = button.dataset.areaId;
+      const decision = button.dataset.decision;
+      const commentField = preSessionPendingList.querySelector(
+        `[data-presession-comment][data-open-item-id="${openItemId}"][data-area-id="${areaId}"]`,
+      );
+      const comment = commentField ? commentField.value.trim() : "";
+
+      try {
+        const response = await fetch(apiUrl("/api/pre-session/respond"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            openItemId,
+            areaId,
+            decision,
+            comment,
+          }),
+        });
+        const payload = await parseApiResponse(response, "No se pudo guardar tu revision de pre-sesion.");
+        Object.assign(state, payload.state);
+        preSessionDashboard = payload.dashboard;
+        preSessionJobStatus.textContent = `Revision guardada para ${openItemId} / ${areaId}.`;
+        renderPreSessionDashboard();
+      } catch (error) {
+        window.alert(error.message || "No se pudo guardar tu revision de pre-sesion.");
+      }
+    });
+  });
 }
 
 function activateTab(tabId) {
@@ -703,6 +818,7 @@ async function saveState() {
   const payload = await parseApiResponse(response, "No se pudo guardar el estado.");
   Object.assign(state, payload.state);
   refreshDerivedViews();
+  await loadPreSessionDashboard();
 }
 
 async function loadState() {
@@ -718,6 +834,7 @@ async function loadState() {
   renderOpenItems();
   renderSourceStatus();
   dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+  await loadPreSessionDashboard();
 }
 
 async function loadEmployeeDirectory() {
@@ -729,6 +846,16 @@ async function loadEmployeeDirectory() {
   importedContacts = Array.isArray(payload.contacts) ? payload.contacts : [];
   renderContactSuggestions();
   renderEmployeesImportStatus(payload);
+}
+
+async function loadPreSessionDashboard() {
+  const response = await fetch(apiUrl("/api/pre-session/dashboard"));
+  if (response.status === 401) {
+    return;
+  }
+  const payload = await parseApiResponse(response, "No se pudo cargar la vista de pre-sesion.");
+  preSessionDashboard = payload;
+  renderPreSessionDashboard();
 }
 
 function showAuthOnly(message = "") {
@@ -875,6 +1002,7 @@ async function applyImportedPayload(response) {
   renderOpenItems();
   renderSourceStatus();
   dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+  await loadPreSessionDashboard();
 }
 
 openItemForm.addEventListener("submit", (event) => {
@@ -901,6 +1029,7 @@ openItemForm.addEventListener("submit", (event) => {
     externalStatus: "",
     ccbScore: "",
     rawSheetRow: null,
+    preSessionChecks: [],
     votes: [],
   });
 
@@ -1036,6 +1165,31 @@ document.getElementById("clear-employees-button").addEventListener("click", asyn
   }
 });
 
+document.getElementById("run-presession-job").addEventListener("click", async () => {
+  try {
+    preSessionJobStatus.textContent = "Ejecutando job de solicitudes de pre-sesion...";
+    const response = await fetch(apiUrl("/api/pre-session/job"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sendEmails: true }),
+    });
+    const payload = await parseApiResponse(response, "No se pudo ejecutar el job de pre-sesion.");
+    Object.assign(state, payload.state);
+    preSessionDashboard = payload.dashboard;
+    renderPreSessionDashboard();
+    preSessionJobStatus.textContent = payload.notifications.length
+      ? payload.notifications.map((entry) => {
+          const modeLabel = entry.sent ? "enviado" : entry.deliveryMode === "preview" ? "preview" : "pendiente";
+          const suffix = entry.error ? ` | error: ${entry.error}` : "";
+          return `- ${entry.ownerEmail}: ${entry.pendingCount} item(s) | ${modeLabel}${suffix}`;
+        }).join("\n")
+      : "No habia owners con solicitudes pendientes.";
+  } catch (error) {
+    preSessionJobStatus.textContent = `Error: ${error.message || "No se pudo ejecutar el job."}`;
+    window.alert(error.message || "No se pudo ejecutar el job de pre-sesion.");
+  }
+});
+
 document.getElementById("save-live-sync").addEventListener("click", async () => {
   try {
     const response = await fetch(apiUrl("/api/live-sync"), {
@@ -1075,6 +1229,7 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
     renderOpenItems();
     renderSourceStatus();
     dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+    await loadPreSessionDashboard();
   } catch (error) {
     window.alert(error.message || "No se pudo ejecutar la sincronizacion.");
   }

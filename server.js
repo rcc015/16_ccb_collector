@@ -15,6 +15,7 @@ const SOURCE_SHEET_NAME = process.env.SOURCE_SHEET_NAME || "Open Item List";
 const SOURCE_SHEET_HEADER_ROW = Number(process.env.SOURCE_SHEET_HEADER_ROW || 0);
 const AREAS_SHEET_NAME = process.env.AREAS_SHEET_NAME || "CCB Areas";
 const VOTES_SHEET_NAME = process.env.VOTES_SHEET_NAME || "CCB Votes";
+const PRESESSION_SHEET_NAME = process.env.PRESESSION_SHEET_NAME || "CCB PreSession";
 const GOOGLE_SHEETS_AUTH_MODE = process.env.GOOGLE_SHEETS_AUTH_MODE || "";
 const GOOGLE_SERVICE_ACCOUNT_KEY_PATH = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || "";
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
@@ -57,7 +58,21 @@ const OPEN_ITEM_HEADERS = [
 ];
 const AREA_HEADERS = ["id", "name", "owner", "email", "sourceColumn"];
 const VOTE_HEADERS = ["openItemId", "areaId", "decision", "comment", "createdAt"];
+const PRESESSION_HEADERS = [
+  "openItemId",
+  "areaId",
+  "decision",
+  "comment",
+  "requestedAt",
+  "lastNotifiedAt",
+  "respondedAt",
+  "responderEmail",
+];
 const GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
+const GOOGLE_USER_OAUTH_SCOPES = [
+  ...GOOGLE_SHEETS_SCOPES,
+  "https://www.googleapis.com/auth/gmail.send",
+];
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -547,12 +562,32 @@ function redirectToApp(response, status, message = "") {
   response.end();
 }
 
-function mapSnapshotToState(snapshot, existingState = null, areasOverride = null, votesOverride = null) {
+function normalizePreSessionDecision(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "impact" || normalized === "impacts" || normalized === "impacta" || normalized === "yes") {
+    return "impact";
+  }
+  if (normalized === "no-impact" || normalized === "no impact" || normalized === "no-impacta" || normalized === "no") {
+    return "no-impact";
+  }
+  return "";
+}
+
+function buildExistingPreSessionCheckMap(state) {
+  return new Map(
+    (state?.openItems || []).map((item) => [item.id, Array.isArray(item.preSessionChecks) ? item.preSessionChecks : []]),
+  );
+}
+
+function mapSnapshotToState(snapshot, existingState = null, areasOverride = null, votesOverride = null, preSessionOverride = null) {
   const areas = Array.isArray(areasOverride) && areasOverride.length ? areasOverride : getAreaDirectory();
   const areaColumns = areas.filter((area) => area.sourceColumn);
   const previousVotes = votesOverride instanceof Map
     ? votesOverride
     : new Map((existingState?.openItems || []).map((item) => [item.id, item.votes || []]));
+  const previousPreSessionChecks = preSessionOverride instanceof Map
+    ? preSessionOverride
+    : buildExistingPreSessionCheckMap(existingState);
   const sourceType = snapshot.sourceType || existingState?.source?.type || "google-sheet-snapshot";
 
   const openItems = (snapshot.rows || [])
@@ -580,6 +615,7 @@ function mapSnapshotToState(snapshot, existingState = null, areasOverride = null
         ccbScore: row.ccbScore || "",
         rawSheetRow: row,
         votes: previousVotes.get(row.id) || [],
+        preSessionChecks: previousPreSessionChecks.get(row.id) || [],
       };
     });
 
@@ -700,6 +736,357 @@ function buildDailyReport(state) {
     newVotes,
     openSummary: buildOpenReport(state),
     ccbCandidates,
+  };
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isPreSessionCandidate(item) {
+  if (!item || item.status === "closed") {
+    return false;
+  }
+
+  const normalizedStatus = String(item.externalStatus || "").trim().toUpperCase();
+  return (
+    !normalizedStatus ||
+    normalizedStatus === "REVIEW" ||
+    normalizedStatus === "READY FOR REVIEW" ||
+    normalizedStatus === "NO LOCALIZED" ||
+    normalizedStatus === "N/A"
+  );
+}
+
+function getPreSessionCheck(item, areaId) {
+  return (item.preSessionChecks || []).find((check) => check.areaId === areaId) || null;
+}
+
+function upsertPreSessionCheck(item, areaId, patch) {
+  if (!Array.isArray(item.preSessionChecks)) {
+    item.preSessionChecks = [];
+  }
+
+  let check = item.preSessionChecks.find((candidate) => candidate.areaId === areaId);
+  if (!check) {
+    check = {
+      areaId,
+      decision: "",
+      comment: "",
+      requestedAt: "",
+      lastNotifiedAt: "",
+      respondedAt: "",
+      responderEmail: "",
+    };
+    item.preSessionChecks.push(check);
+  }
+
+  Object.assign(check, patch);
+  check.decision = normalizePreSessionDecision(check.decision);
+  check.comment = String(check.comment || "").trim();
+  check.requestedAt = String(check.requestedAt || "").trim();
+  check.lastNotifiedAt = String(check.lastNotifiedAt || "").trim();
+  check.respondedAt = String(check.respondedAt || "").trim();
+  check.responderEmail = normalizeEmail(check.responderEmail);
+  return check;
+}
+
+function applyPreSessionImpactDecision(item, areaId, decision) {
+  const impactedAreaIds = new Set(Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : []);
+  if (decision === "impact") {
+    impactedAreaIds.add(areaId);
+  }
+  if (decision === "no-impact") {
+    impactedAreaIds.delete(areaId);
+  }
+  item.impactedAreaIds = Array.from(impactedAreaIds);
+
+  if (!item.ownerAreaId || !item.impactedAreaIds.includes(item.ownerAreaId)) {
+    item.ownerAreaId = item.impactedAreaIds[0] || "";
+  }
+}
+
+function getOwnedAreasForUser(state, user) {
+  const userEmail = normalizeEmail(user?.email);
+  if (!userEmail) {
+    return [];
+  }
+
+  return state.areas.filter((area) => normalizeEmail(area.email) === userEmail);
+}
+
+function buildPreSessionOwnerView(state, user) {
+  const ownedAreas = getOwnedAreasForUser(state, user);
+  const areaMap = new Map(ownedAreas.map((area) => [area.id, area]));
+  const pendingItems = [];
+  const answeredItems = [];
+
+  state.openItems
+    .filter((item) => isPreSessionCandidate(item))
+    .forEach((item) => {
+      const relevantAreaIds = new Set([
+        ...ownedAreas.map((area) => area.id),
+        ...((item.preSessionChecks || []).map((check) => check.areaId)),
+      ]);
+
+      Array.from(relevantAreaIds).forEach((areaId) => {
+        const area = areaMap.get(areaId);
+        if (!area) {
+          return;
+        }
+
+        const check = getPreSessionCheck(item, areaId);
+        const entry = {
+          openItemId: item.id,
+          title: item.title,
+          description: item.description || "",
+          itemStatus: item.status || "open",
+          externalStatus: item.externalStatus || "",
+          isSubstantial: Boolean(item.isSubstantial),
+          ownerAreaId: item.ownerAreaId || "",
+          areaId,
+          areaName: area.name,
+          requestedAt: check?.requestedAt || "",
+          lastNotifiedAt: check?.lastNotifiedAt || "",
+          respondedAt: check?.respondedAt || "",
+          decision: check?.decision || "",
+          comment: check?.comment || "",
+          sourceRef: item.sourceRef || "",
+          currentlyImpacted: Array.isArray(item.impactedAreaIds) && item.impactedAreaIds.includes(areaId),
+        };
+
+        if (entry.decision) {
+          answeredItems.push(entry);
+        } else {
+          pendingItems.push(entry);
+        }
+      });
+    });
+
+  const sortEntries = (left, right) =>
+    Number(Boolean(right.externalStatus)) - Number(Boolean(left.externalStatus)) ||
+    Number(right.isSubstantial) - Number(left.isSubstantial) ||
+    left.openItemId.localeCompare(right.openItemId);
+
+  pendingItems.sort(sortEntries);
+  answeredItems.sort((left, right) => (right.respondedAt || "").localeCompare(left.respondedAt || "") || sortEntries(left, right));
+
+  return {
+    ownedAreas: ownedAreas.map((area) => ({
+      id: area.id,
+      name: area.name,
+      email: area.email,
+    })),
+    pendingItems,
+    answeredItems,
+  };
+}
+
+function buildPreSessionOwnerQueue(state) {
+  const areaMap = buildAreaMap(state);
+  const groups = new Map();
+
+  state.openItems
+    .filter((item) => isPreSessionCandidate(item))
+    .forEach((item) => {
+      state.areas.forEach((stateArea) => {
+        const areaId = stateArea.id;
+        const area = areaMap.get(areaId);
+        const ownerEmail = normalizeEmail(area?.email);
+        if (!area || !ownerEmail) {
+          return;
+        }
+
+        const check = getPreSessionCheck(item, areaId);
+        if (check?.decision) {
+          return;
+        }
+
+        if (!groups.has(ownerEmail)) {
+          groups.set(ownerEmail, {
+            ownerEmail,
+            ownerName: area.owner || area.name,
+            areaNames: new Set(),
+            pendingItems: [],
+            lastNotifiedAt: "",
+          });
+        }
+
+        const group = groups.get(ownerEmail);
+        group.areaNames.add(area.name);
+        group.lastNotifiedAt = [group.lastNotifiedAt, check?.lastNotifiedAt || ""].sort().reverse()[0] || group.lastNotifiedAt;
+        group.pendingItems.push({
+          openItemId: item.id,
+          title: item.title,
+          areaId,
+          areaName: area.name,
+          itemStatus: item.status || "open",
+          externalStatus: item.externalStatus || "",
+          requestedAt: check?.requestedAt || "",
+          lastNotifiedAt: check?.lastNotifiedAt || "",
+          isSubstantial: Boolean(item.isSubstantial),
+        });
+      });
+    });
+
+  return Array.from(groups.values())
+    .map((group) => ({
+      ownerEmail: group.ownerEmail,
+      ownerName: group.ownerName,
+      areaNames: Array.from(group.areaNames).sort(),
+      pendingCount: group.pendingItems.length,
+      lastNotifiedAt: group.lastNotifiedAt || "",
+      pendingItems: group.pendingItems.sort((left, right) => left.openItemId.localeCompare(right.openItemId)),
+    }))
+    .sort((left, right) => right.pendingCount - left.pendingCount || left.ownerEmail.localeCompare(right.ownerEmail));
+}
+
+function buildPreSessionDashboard(state, user) {
+  return {
+    ownerView: buildPreSessionOwnerView(state, user),
+    ownerQueue: buildPreSessionOwnerQueue(state),
+    gmailDeliveryAvailable: getGoogleSheetsStorageMode() === "user-oauth" && isUserGoogleOAuthConnected(),
+  };
+}
+
+function buildPreSessionEmailSubject(group) {
+  return `CCB pre-sesion: revision pendiente para ${group.pendingCount} open item${group.pendingCount === 1 ? "" : "s"}`;
+}
+
+function buildPreSessionEmailBody(group) {
+  const appUrl = loadAuthConfig().appBaseUrl || withBasePath("/");
+  const lines = [
+    `Hola ${group.ownerName || group.ownerEmail},`,
+    "",
+    "Necesitamos tu revision de pre-sesion para los siguientes open items donde tu area aparece impactada.",
+    "Por favor entra a la app y marca si impacta o no impacta para tu area.",
+    "",
+    ...group.pendingItems.map((item) => `- ${item.openItemId} | ${item.title} | Area: ${item.areaName}${item.externalStatus ? ` | Estado: ${item.externalStatus}` : ""}`),
+    "",
+    `App: ${appUrl}`,
+  ];
+
+  return lines.join("\n");
+}
+
+function toBase64Url(value) {
+  return Buffer.from(value, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function sendGmailMessage({ to, subject, text }) {
+  if (getGoogleSheetsStorageMode() !== "user-oauth") {
+    throw new Error("El envio de correo requiere Google OAuth de usuario conectado.");
+  }
+
+  const url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+  const headers = await getGoogleRequestHeaders(url);
+  const rawMessage = [
+    "Content-Type: text/plain; charset=UTF-8",
+    "MIME-Version: 1.0",
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    "",
+    text,
+  ].join("\r\n");
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      raw: toBase64Url(rawMessage),
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Gmail send error ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+
+  return response.json();
+}
+
+async function runPreSessionRequestJob(user) {
+  const state = await loadStateStore();
+  const queue = buildPreSessionOwnerQueue(state);
+  const now = new Date().toISOString();
+  const results = [];
+
+  for (const group of queue) {
+    group.pendingItems.forEach((entry) => {
+      const item = state.openItems.find((candidate) => candidate.id === entry.openItemId);
+      if (!item) {
+        return;
+      }
+
+      const existing = getPreSessionCheck(item, entry.areaId);
+      upsertPreSessionCheck(item, entry.areaId, {
+        requestedAt: existing?.requestedAt || now,
+      });
+    });
+  }
+
+  for (const group of queue) {
+    const subject = buildPreSessionEmailSubject(group);
+    const body = buildPreSessionEmailBody(group);
+    let deliveryMode = "preview";
+    let sent = false;
+    let errorMessage = "";
+
+    try {
+      if (getGoogleSheetsStorageMode() === "user-oauth" && isUserGoogleOAuthConnected()) {
+        await sendGmailMessage({
+          to: group.ownerEmail,
+          subject,
+          text: body,
+        });
+        deliveryMode = "gmail";
+        sent = true;
+      }
+    } catch (error) {
+      errorMessage = error.message;
+    }
+
+    if (sent) {
+      group.pendingItems.forEach((entry) => {
+        const item = state.openItems.find((candidate) => candidate.id === entry.openItemId);
+        if (!item) {
+          return;
+        }
+
+        const existing = getPreSessionCheck(item, entry.areaId);
+        upsertPreSessionCheck(item, entry.areaId, {
+          requestedAt: existing?.requestedAt || now,
+          lastNotifiedAt: now,
+        });
+      });
+    }
+
+    results.push({
+      ownerEmail: group.ownerEmail,
+      ownerName: group.ownerName,
+      pendingCount: group.pendingCount,
+      deliveryMode,
+      sent,
+      error: errorMessage,
+      subject,
+      body,
+    });
+  }
+
+  const nextState = await persistStateStore(state);
+  return {
+    ranAt: now,
+    ranBy: user?.email || "",
+    notifications: results,
+    state: nextState,
+    dashboard: buildPreSessionDashboard(nextState, user),
   };
 }
 
@@ -1104,6 +1491,35 @@ function parseVotesSheetRows(values) {
   return voteMap;
 }
 
+function parsePreSessionSheetRows(values) {
+  const records = buildSheetValuesMap(values);
+  const checksMap = new Map();
+
+  records.forEach((record) => {
+    const openItemId = String(record.openItemId || "").trim();
+    const areaId = String(record.areaId || "").trim();
+    if (!openItemId || !areaId) {
+      return;
+    }
+
+    if (!checksMap.has(openItemId)) {
+      checksMap.set(openItemId, []);
+    }
+
+    checksMap.get(openItemId).push({
+      areaId,
+      decision: normalizePreSessionDecision(record.decision),
+      comment: String(record.comment || "").trim(),
+      requestedAt: String(record.requestedAt || "").trim(),
+      lastNotifiedAt: String(record.lastNotifiedAt || "").trim(),
+      respondedAt: String(record.respondedAt || "").trim(),
+      responderEmail: String(record.responderEmail || "").trim().toLowerCase(),
+    });
+  });
+
+  return checksMap;
+}
+
 function buildOpenItemsRowsFromState(state, areas) {
   const areaColumns = areas.filter((area) => area.sourceColumn);
   const headers = buildOpenItemHeaders(state, areas);
@@ -1129,11 +1545,28 @@ function buildOpenItemsRowsFromState(state, areas) {
     baseRow["CCB Status"] = item.externalStatus || (item.isSubstantial ? "REVIEW" : "No Localized");
 
     areaColumns.forEach((area) => {
+      const preSessionCheck = getPreSessionCheck(item, area.id);
+      if (isPreSessionCandidate(item)) {
+        if (preSessionCheck?.decision === "impact") {
+          baseRow[area.sourceColumn] = true;
+          return;
+        }
+        if (preSessionCheck?.decision === "no-impact") {
+          baseRow[area.sourceColumn] = false;
+          return;
+        }
+        baseRow[area.sourceColumn] = "";
+        return;
+      }
+
       baseRow[area.sourceColumn] = impactedAreaIds.has(area.id);
     });
 
     return headers.map((header) => {
       if (checkboxHeaders.has(header)) {
+        if (baseRow[header] === "") {
+          return "";
+        }
         return Boolean(baseRow[header]);
       }
       return String(baseRow[header] || "").trim();
@@ -1163,6 +1596,26 @@ function buildVotesSheetRows(state) {
   });
 
   return [VOTE_HEADERS, ...rows];
+}
+
+function buildPreSessionSheetRows(state) {
+  const rows = [];
+  state.openItems.forEach((item) => {
+    (item.preSessionChecks || []).forEach((check) => {
+      rows.push([
+        item.id || "",
+        check.areaId || "",
+        normalizePreSessionDecision(check.decision),
+        check.comment || "",
+        check.requestedAt || "",
+        check.lastNotifiedAt || "",
+        check.respondedAt || "",
+        check.responderEmail || "",
+      ]);
+    });
+  });
+
+  return [PRESESSION_HEADERS, ...rows];
 }
 
 function loadServiceAccountCredentials() {
@@ -1553,13 +2006,18 @@ async function loadStateFromGoogleSheets() {
   if (existingSheets.has(VOTES_SHEET_NAME)) {
     ranges.push(VOTES_SHEET_NAME);
   }
+  if (existingSheets.has(PRESESSION_SHEET_NAME)) {
+    ranges.push(PRESESSION_SHEET_NAME);
+  }
   const valueMap = await batchGetSpreadsheetValues(ranges);
   const openItemValues = valueMap.get(SOURCE_SHEET_NAME) || [];
   const areaValues = valueMap.get(AREAS_SHEET_NAME) || [];
   const voteValues = valueMap.get(VOTES_SHEET_NAME) || [];
+  const preSessionValues = valueMap.get(PRESESSION_SHEET_NAME) || [];
   const openItemContext = getOpenItemSheetContext(openItemValues);
   const areas = parseAreasSheetRows(areaValues);
   const votesMap = parseVotesSheetRows(voteValues);
+  const preSessionChecksMap = parsePreSessionSheetRows(preSessionValues);
   const effectiveAreas = areas.length ? areas : getAreaDirectory();
   const snapshot = {
     spreadsheetId: SOURCE_SPREADSHEET_ID,
@@ -1596,7 +2054,7 @@ async function loadStateFromGoogleSheets() {
     })),
   };
 
-  const state = mapSnapshotToState(snapshot, null, effectiveAreas, votesMap);
+  const state = mapSnapshotToState(snapshot, null, effectiveAreas, votesMap, preSessionChecksMap);
   state.source = {
     ...state.source,
     type: "google-sheets",
@@ -1622,12 +2080,14 @@ async function persistStateToGoogleSheets(nextState) {
   const openItemRows = buildOpenItemsRowsFromState(normalizedState, areas);
   const areaRows = buildAreasSheetRows(areas);
   const voteRows = buildVotesSheetRows(normalizedState);
+  const preSessionRows = buildPreSessionSheetRows(normalizedState);
 
-  await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME]);
+  await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME, PRESESSION_SHEET_NAME]);
   await writeOpenItemsSheetPreservingTemplate(openItemRows);
   await Promise.all([
     clearAndWriteSheet(AREAS_SHEET_NAME, areaRows),
     clearAndWriteSheet(VOTES_SHEET_NAME, voteRows),
+    clearAndWriteSheet(PRESESSION_SHEET_NAME, preSessionRows),
   ]);
 
   return loadStateFromGoogleSheets();
@@ -1743,6 +2203,17 @@ function sanitizeState(input) {
           externalStatus: item.externalStatus || "",
           ccbScore: item.ccbScore || "",
           rawSheetRow: item.rawSheetRow || null,
+          preSessionChecks: Array.isArray(item.preSessionChecks)
+            ? item.preSessionChecks.map((check) => ({
+                areaId: check.areaId,
+                decision: normalizePreSessionDecision(check.decision),
+                comment: check.comment || "",
+                requestedAt: check.requestedAt || "",
+                lastNotifiedAt: check.lastNotifiedAt || "",
+                respondedAt: check.respondedAt || "",
+                responderEmail: String(check.responderEmail || "").trim().toLowerCase(),
+              }))
+            : [],
           votes: Array.isArray(item.votes)
             ? item.votes.map((vote) => ({
                 areaId: vote.areaId,
@@ -1896,7 +2367,7 @@ const server = http.createServer(async (request, response) => {
         access_type: "offline",
         prompt: "consent",
         include_granted_scopes: true,
-        scope: GOOGLE_SHEETS_SCOPES,
+        scope: GOOGLE_USER_OAUTH_SCOPES,
         state: createGoogleSheetsOAuthState(request),
       });
       response.writeHead(302, { Location: authUrl });
@@ -1933,6 +2404,74 @@ const server = http.createServer(async (request, response) => {
         ok: true,
         ...clearEmployeeDirectory(),
       });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/pre-session/dashboard") {
+      const state = await loadStateStore();
+      sendJson(response, 200, buildPreSessionDashboard(state, getCurrentUser(request)));
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/pre-session/respond") {
+      const body = await parseBody(request);
+      const user = getCurrentUser(request);
+      const state = await loadStateStore();
+      const openItemId = String(body.openItemId || "").trim();
+      const areaId = String(body.areaId || "").trim();
+      const decision = normalizePreSessionDecision(body.decision);
+      const comment = String(body.comment || "").trim();
+      const ownedAreas = new Set(getOwnedAreasForUser(state, user).map((area) => area.id));
+
+      if (!openItemId || !areaId || !decision) {
+        sendJson(response, 400, {
+          error: "Bad request",
+          detail: "Faltan openItemId, areaId o decision valida.",
+        });
+        return;
+      }
+
+      if (!ownedAreas.has(areaId)) {
+        sendJson(response, 403, {
+          error: "Forbidden",
+          detail: "Solo el owner del area puede responder esta revision.",
+        });
+        return;
+      }
+
+      const item = state.openItems.find((candidate) => candidate.id === openItemId);
+      const hasExistingCheck = Boolean(item && getPreSessionCheck(item, areaId));
+      if (!item || (!isPreSessionCandidate(item) && !item.impactedAreaIds.includes(areaId) && !hasExistingCheck)) {
+        sendJson(response, 404, {
+          error: "Not found",
+          detail: "No encontre ese open item impactando el area indicada.",
+        });
+        return;
+      }
+
+      const existing = getPreSessionCheck(item, areaId);
+      upsertPreSessionCheck(item, areaId, {
+        requestedAt: existing?.requestedAt || "",
+        lastNotifiedAt: existing?.lastNotifiedAt || "",
+        decision,
+        comment,
+        respondedAt: new Date().toISOString(),
+        responderEmail: user?.email || "",
+      });
+      applyPreSessionImpactDecision(item, areaId, decision);
+
+      const nextState = await persistStateStore(state);
+      sendJson(response, 200, {
+        ok: true,
+        state: nextState,
+        dashboard: buildPreSessionDashboard(nextState, user),
+      });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/pre-session/job") {
+      const result = await runPreSessionRequestJob(getCurrentUser(request));
+      sendJson(response, 200, result);
       return;
     }
 

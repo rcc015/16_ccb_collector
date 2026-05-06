@@ -41,6 +41,7 @@
       <section class="tab-shell">
         <nav class="tab-nav" aria-label="Secciones principales">
           <button class="tab-button is-active" type="button" data-tab="summary">Resumen</button>
+          <button class="tab-button" type="button" data-tab="presession">Pre-sesion CCB</button>
           <button class="tab-button" type="button" data-tab="items">Open Items</button>
           <button class="tab-button" type="button" data-tab="sources">Fuentes</button>
           <button class="tab-button" type="button" data-tab="framework">Marco CCB</button>
@@ -121,6 +122,34 @@
               <h2>Open items activos</h2>
             </div>
             <div id="open-items-list" class="card-grid"></div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="presession">
+          <section class="panel two-column">
+            <div>
+              <div class="section-heading">
+                <h2>Tu revision</h2>
+              </div>
+              <div id="presession-owner-summary" class="source-status"></div>
+              <div id="presession-pending-list" class="presession-list"></div>
+              <div class="section-heading top-gap">
+                <h2>Ya respondido</h2>
+              </div>
+              <div id="presession-answered-list" class="presession-list"></div>
+            </div>
+
+            <div>
+              <div class="section-heading">
+                <h2>Job de solicitud</h2>
+                <button id="run-presession-job" class="secondary">Enviar pendientes</button>
+              </div>
+              <p class="meta-line">
+                Este job agrupa los open items sin respuesta por owner y les manda la solicitud de revision de pre-sesion.
+              </p>
+              <div id="presession-job-summary" class="source-status"></div>
+              <pre id="presession-job-status" class="report-box"></pre>
+            </div>
           </section>
         </section>
 
