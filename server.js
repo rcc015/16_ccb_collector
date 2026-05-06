@@ -213,6 +213,18 @@ function getAreaDirectory() {
   return Array.isArray(payload.areas) ? payload.areas : [];
 }
 
+function resolveAreas(areasOverride = null, existingState = null) {
+  if (Array.isArray(areasOverride) && areasOverride.length) {
+    return areasOverride;
+  }
+
+  if (Array.isArray(existingState?.areas) && existingState.areas.length) {
+    return existingState.areas;
+  }
+
+  return getAreaDirectory();
+}
+
 function getEmployeeDirectory() {
   const payload = readOptionalJson(EMPLOYEE_DIRECTORY_FILE, {
     importedAt: "",
@@ -235,6 +247,57 @@ function persistEmployeeDirectory(directory) {
   };
   writeJson(EMPLOYEE_DIRECTORY_FILE, nextDirectory);
   return nextDirectory;
+}
+
+function buildKnownContactsDirectory(areas = []) {
+  const contactsByEmail = new Map();
+  const contactsByName = new Map();
+
+  const pushContact = (name, email) => {
+    const normalizedName = String(name || "").trim();
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedName && !normalizedEmail) {
+      return;
+    }
+
+    const contact = {
+      name: normalizedName,
+      email: normalizedEmail,
+    };
+
+    if (normalizedEmail && !contactsByEmail.has(normalizedEmail)) {
+      contactsByEmail.set(normalizedEmail, contact);
+    }
+
+    if (normalizedName) {
+      const key = normalizedName.toLowerCase();
+      if (!contactsByName.has(key)) {
+        contactsByName.set(key, contact);
+      }
+    }
+  };
+
+  getEmployeeDirectory().contacts.forEach((contact) => pushContact(contact.name, contact.email));
+  areas.forEach((area) => pushContact(area.owner, area.email));
+
+  return {
+    byEmail: contactsByEmail,
+    byName: contactsByName,
+  };
+}
+
+function resolveContactByValue(value, contactsDirectory) {
+  const normalizedValue = String(value || "").trim();
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const normalizedEmail = normalizeEmail(normalizedValue);
+  if (contactsDirectory.byEmail.has(normalizedEmail)) {
+    return contactsDirectory.byEmail.get(normalizedEmail);
+  }
+
+  return contactsDirectory.byName.get(normalizedValue.toLowerCase()) || null;
 }
 
 function clearEmployeeDirectory() {
@@ -580,7 +643,7 @@ function buildExistingPreSessionCheckMap(state) {
 }
 
 function mapSnapshotToState(snapshot, existingState = null, areasOverride = null, votesOverride = null, preSessionOverride = null) {
-  const areas = Array.isArray(areasOverride) && areasOverride.length ? areasOverride : getAreaDirectory();
+  const areas = resolveAreas(areasOverride, existingState);
   const areaColumns = areas.filter((area) => area.sourceColumn);
   const previousVotes = votesOverride instanceof Map
     ? votesOverride
@@ -1530,10 +1593,11 @@ function buildOpenItemsRowsFromState(state, areas) {
       ? { ...item.rawSheetRow }
       : {};
     const impactedAreaIds = new Set(Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : []);
+    const preservedOwner = String(baseRow.Owner || baseRow.owner || "").trim();
 
     baseRow.ID = item.id || "";
     baseRow["Open Item Description"] = item.title || "";
-    baseRow.Owner = item.ownerName || "";
+    baseRow.Owner = String(item.ownerName || preservedOwner).trim();
     baseRow["Date Created"] = formatMexicoCityDateTime(item.createdAt || baseRow["Date Created"] || "");
     baseRow["Due Date"] = formatMexicoCityDateTime(item.dueDate || baseRow["Due Date"] || "");
     baseRow.Status = item.status || "open";
@@ -1876,6 +1940,28 @@ async function clearSheetRange(sheetRange) {
   }
 }
 
+async function batchUpdateSpreadsheet(requests) {
+  if (!requests.length) {
+    return;
+  }
+
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}:batchUpdate`;
+  const headers = await getGoogleRequestHeaders(url);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ requests }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Google Sheets batchUpdate error ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+}
+
 async function writeSheetRange(sheetRange, rows) {
   const updateUrl =
     `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
@@ -1898,6 +1984,53 @@ async function writeSheetRange(sheetRange, rows) {
     const detail = await updateResponse.text().catch(() => "");
     throw new Error(`Google Sheets update error ${updateResponse.status}${detail ? `: ${detail}` : ""}`);
   }
+}
+
+function buildPeopleChipCellValue(contact, displayText = "") {
+  const resolvedEmail = normalizeEmail(contact?.email);
+  if (!resolvedEmail) {
+    return null;
+  }
+
+  return {
+    userEnteredValue: {
+      stringValue: displayText || "@",
+    },
+    chipRuns: [
+      {
+        chip: {
+          personProperties: {
+            email: resolvedEmail,
+            displayFormat: "DEFAULT",
+          },
+        },
+      },
+    ],
+  };
+}
+
+async function applyPeopleChipUpdates(sheetId, chipUpdates) {
+  const requests = chipUpdates
+    .filter((entry) => entry && entry.cellValue)
+    .map((entry) => ({
+      updateCells: {
+        rows: [
+          {
+            values: [entry.cellValue],
+          },
+        ],
+        fields: "userEnteredValue,chipRuns",
+        range: {
+          sheetId,
+          startRowIndex: entry.rowIndex,
+          endRowIndex: entry.rowIndex + 1,
+          startColumnIndex: entry.columnIndex,
+          endColumnIndex: entry.columnIndex + 1,
+        },
+      },
+    }));
+
+  await batchUpdateSpreadsheet(requests);
 }
 
 async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, endRow) {
@@ -1965,16 +2098,77 @@ async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, en
   }
 }
 
-async function writeOpenItemsSheetPreservingTemplate(rows) {
+function getSheetMetadataByName(metadata, sheetName) {
+  return Array.isArray(metadata?.sheets)
+    ? metadata.sheets.find((sheet) => sheet.properties?.title === sheetName) || null
+    : null;
+}
+
+async function applyOpenItemOwnerPeopleChips(sheetId, headerRow, startRow, state) {
+  if (!sheetId) {
+    return;
+  }
+
+  const ownerColumnIndex = headerRow.findIndex((value) => String(value || "").trim() === "Owner");
+  if (ownerColumnIndex < 0) {
+    return;
+  }
+
+  const contactsDirectory = buildKnownContactsDirectory(state.areas || []);
+  const chipUpdates = state.openItems.map((item, index) => {
+    const contact = resolveContactByValue(item.ownerName, contactsDirectory);
+    const cellValue = buildPeopleChipCellValue(contact, "@");
+    if (!cellValue) {
+      return null;
+    }
+
+    return {
+      rowIndex: startRow - 1 + index,
+      columnIndex: ownerColumnIndex,
+      cellValue,
+    };
+  });
+
+  await applyPeopleChipUpdates(sheetId, chipUpdates);
+}
+
+async function applyAreaOwnerPeopleChips(metadata, areas) {
+  const matchedSheet = getSheetMetadataByName(metadata, AREAS_SHEET_NAME);
+  const sheetId = matchedSheet?.properties?.sheetId ?? null;
+  if (!sheetId) {
+    return;
+  }
+
+  const ownerColumnIndex = AREA_HEADERS.indexOf("owner");
+  const contactsDirectory = buildKnownContactsDirectory(areas);
+  const chipUpdates = areas.map((area, index) => {
+    const contact = resolveContactByValue(area.email || area.owner, contactsDirectory) || {
+      name: area.owner,
+      email: area.email,
+    };
+    const cellValue = buildPeopleChipCellValue(contact, "@");
+    if (!cellValue) {
+      return null;
+    }
+
+    return {
+      rowIndex: 1 + index,
+      columnIndex: ownerColumnIndex,
+      cellValue,
+    };
+  });
+
+  await applyPeopleChipUpdates(sheetId, chipUpdates);
+}
+
+async function writeOpenItemsSheetPreservingTemplate(rows, state) {
   const [valuesMap, metadata] = await Promise.all([
     batchGetSpreadsheetValues([SOURCE_SHEET_NAME]),
     fetchSpreadsheetMetadata(),
   ]);
   const existingValues = valuesMap.get(SOURCE_SHEET_NAME) || [];
   const context = getOpenItemSheetContext(existingValues);
-  const matchedSheet = Array.isArray(metadata.sheets)
-    ? metadata.sheets.find((sheet) => sheet.properties?.title === SOURCE_SHEET_NAME)
-    : null;
+  const matchedSheet = getSheetMetadataByName(metadata, SOURCE_SHEET_NAME);
   const sheetId = matchedSheet?.properties?.sheetId ?? null;
   const headerWidth = Math.max(context.headerRow.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
   const existingDataRowCount = Math.max(0, existingValues.length - context.headerRowNumber);
@@ -1992,6 +2186,7 @@ async function writeOpenItemsSheetPreservingTemplate(rows) {
   }
 
   await applyOpenItemsCheckboxValidation(sheetId, context.headerRow, startRow, endRow);
+  await applyOpenItemOwnerPeopleChips(sheetId, context.headerRow, startRow, state);
 }
 
 async function loadStateFromGoogleSheets() {
@@ -2066,9 +2261,9 @@ async function loadStateFromGoogleSheets() {
 
 async function persistStateToGoogleSheets(nextState) {
   const normalizedState = sanitizeState(nextState);
-  const areas = Array.isArray(normalizedState.areas) && normalizedState.areas.length
-    ? normalizedState.areas
-    : getAreaDirectory();
+  const existingState = await loadStateFromGoogleSheets();
+  const areas = resolveAreas(normalizedState.areas, existingState);
+  normalizedState.areas = areas;
   const headers = buildOpenItemHeaders(normalizedState, areas);
   normalizedState.source = {
     ...(normalizedState.source || {}),
@@ -2083,12 +2278,13 @@ async function persistStateToGoogleSheets(nextState) {
   const preSessionRows = buildPreSessionSheetRows(normalizedState);
 
   await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME, PRESESSION_SHEET_NAME]);
-  await writeOpenItemsSheetPreservingTemplate(openItemRows);
+  await writeOpenItemsSheetPreservingTemplate(openItemRows, normalizedState);
   await Promise.all([
     clearAndWriteSheet(AREAS_SHEET_NAME, areaRows),
     clearAndWriteSheet(VOTES_SHEET_NAME, voteRows),
     clearAndWriteSheet(PRESESSION_SHEET_NAME, preSessionRows),
   ]);
+  await applyAreaOwnerPeopleChips(await fetchSpreadsheetMetadata(), areas);
 
   return loadStateFromGoogleSheets();
 }

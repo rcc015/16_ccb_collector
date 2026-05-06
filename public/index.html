@@ -21,15 +21,15 @@
     </section>
 
     <main id="app-shell" class="app-shell app-hidden">
-      <section class="hero">
-        <div>
+      <section class="hero hero-shell">
+        <div class="hero-copy-shell">
           <p class="eyebrow">Change Control Board</p>
           <h1>CCB Collector</h1>
           <p class="hero-copy">
             Controla open items, valida si existe cambio sustancial, identifica areas impactadas, registra votos y prepara el reporte diario para la sesion de CCB.
           </p>
         </div>
-        <div>
+        <div class="hero-side-shell">
           <div id="prerequisite-card" class="status-card"></div>
           <div class="button-row top-gap">
             <div id="current-user" class="meta-line"></div>
@@ -49,7 +49,7 @@
 
         <section class="tab-panel is-active" data-tab-panel="summary">
           <section class="panel two-column">
-            <div>
+            <div class="panel-column">
               <div class="section-heading">
                 <h2>Owners por area</h2>
                 <div class="button-row">
@@ -70,7 +70,7 @@
               <div id="areas-list" class="area-editor-list"></div>
             </div>
 
-            <div>
+            <div class="panel-column">
               <div class="section-heading">
                 <h2>Reporte diario</h2>
                 <button id="copy-report" class="secondary">Copiar resumen</button>
@@ -127,7 +127,7 @@
 
         <section class="tab-panel" data-tab-panel="presession">
           <section class="panel two-column">
-            <div>
+            <div class="panel-column">
               <div class="section-heading">
                 <h2>Tu revision</h2>
               </div>
@@ -139,7 +139,7 @@
               <div id="presession-answered-list" class="presession-list"></div>
             </div>
 
-            <div>
+            <div class="panel-column">
               <div class="section-heading">
                 <h2>Job de solicitud</h2>
                 <button id="run-presession-job" class="secondary">Enviar pendientes</button>
@@ -240,6 +240,13 @@
           <p class="item-description"></p>
           <p class="meta-line"></p>
           <p class="impact-line"></p>
+          <div class="stack open-item-owner-editor">
+            <p class="field-label">Open item owner</p>
+            <div class="autocomplete-shell">
+              <input data-open-item-owner-input placeholder="Selecciona o corrige el assignee" autocomplete="off" />
+              <div class="autocomplete-list" data-open-item-owner-autocomplete hidden></div>
+            </div>
+          </div>
           <div class="vote-list"></div>
           <form class="vote-form stack">
             <select name="areaId"></select>

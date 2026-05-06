@@ -117,6 +117,7 @@ const DECISION_THRESHOLDS = [
 let authConfig = null;
 let importedContacts = [];
 let preSessionDashboard = null;
+let autoSavePromise = null;
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
 
 function apiUrl(path) {
@@ -227,11 +228,11 @@ function setAreaOwnerSelection(areaId, contact) {
   }
 }
 
-function renderOwnerAutocomplete(dropdown, areaId, query) {
+function renderContactAutocomplete(dropdown, query, onSelect, emptyMessage = "") {
   const matches = getMatchingContacts(query);
   if (!matches.length) {
     dropdown.hidden = true;
-    dropdown.innerHTML = "";
+    dropdown.innerHTML = emptyMessage ? `<div class="autocomplete-empty">${emptyMessage}</div>` : "";
     return;
   }
 
@@ -239,7 +240,6 @@ function renderOwnerAutocomplete(dropdown, areaId, query) {
     <button
       type="button"
       class="autocomplete-option"
-      data-area-id="${areaId}"
       data-contact-index="${index}"
     >
       <span class="autocomplete-name">${contact.name || contact.email}</span>
@@ -253,10 +253,16 @@ function renderOwnerAutocomplete(dropdown, areaId, query) {
       event.preventDefault();
       const index = Number(button.dataset.contactIndex);
       const selectedContact = matches[index];
-      setAreaOwnerSelection(areaId, selectedContact);
+      onSelect(selectedContact);
       dropdown.hidden = true;
       dropdown.innerHTML = "";
     });
+  });
+}
+
+function renderOwnerAutocomplete(dropdown, areaId, query) {
+  renderContactAutocomplete(dropdown, query, (selectedContact) => {
+    setAreaOwnerSelection(areaId, selectedContact);
   });
 }
 
@@ -705,6 +711,64 @@ function renderOpenItems() {
     node.querySelector(".impact-line").textContent = `Impacto: ${impactedAreaNames(item) || "Sin areas impactadas"}`;
     node.querySelector(".vote-list").innerHTML = renderVotes(item.votes);
 
+    const ownerInput = node.querySelector("[data-open-item-owner-input]");
+    const ownerDropdown = node.querySelector("[data-open-item-owner-autocomplete]");
+    let lastCommittedOwner = item.ownerName || "";
+    const applyOpenItemOwnerSelection = async (selectedContact) => {
+      const nextOwner = (selectedContact?.name || selectedContact?.email || "").trim();
+      if (!nextOwner || nextOwner === lastCommittedOwner) {
+        ownerInput.value = nextOwner || ownerInput.value;
+        return;
+      }
+
+      item.ownerName = nextOwner;
+      ownerInput.value = nextOwner;
+      node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
+
+      try {
+        await saveStateSilently();
+        lastCommittedOwner = item.ownerName || nextOwner;
+      } catch (error) {
+        item.ownerName = lastCommittedOwner;
+        ownerInput.value = lastCommittedOwner;
+        node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
+        window.alert(error.message || "No se pudo guardar el open item owner.");
+      }
+    };
+
+    ownerInput.value = item.ownerName || "";
+    ownerInput.addEventListener("input", (event) => {
+      item.ownerName = event.currentTarget.value.trim();
+      node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
+      renderContactAutocomplete(
+        ownerDropdown,
+        item.ownerName,
+        applyOpenItemOwnerSelection,
+        "Sin coincidencias en el directorio de empleados.",
+      );
+    });
+    ownerInput.addEventListener("focus", (event) => {
+      renderContactAutocomplete(
+        ownerDropdown,
+        event.currentTarget.value,
+        applyOpenItemOwnerSelection,
+        "Sin coincidencias en el directorio de empleados.",
+      );
+    });
+    ownerInput.addEventListener("blur", () => {
+      const exactContact = findContactByName(ownerInput.value) || findContactByEmail(ownerInput.value);
+      if (exactContact) {
+        applyOpenItemOwnerSelection(exactContact);
+      } else {
+        item.ownerName = lastCommittedOwner;
+        ownerInput.value = lastCommittedOwner;
+        node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
+      }
+      window.setTimeout(() => {
+        ownerDropdown.hidden = true;
+      }, 120);
+    });
+
     const voteAreaSelect = node.querySelector("select[name=\"areaId\"]");
     state.areas.forEach((area) => {
       const option = document.createElement("option");
@@ -819,6 +883,22 @@ async function saveState() {
   Object.assign(state, payload.state);
   refreshDerivedViews();
   await loadPreSessionDashboard();
+}
+
+async function saveStateSilently() {
+  if (autoSavePromise) {
+    return autoSavePromise;
+  }
+
+  autoSavePromise = saveState()
+    .catch((error) => {
+      throw error;
+    })
+    .finally(() => {
+      autoSavePromise = null;
+    });
+
+  return autoSavePromise;
 }
 
 async function loadState() {
