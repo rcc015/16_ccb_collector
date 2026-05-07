@@ -16,6 +16,7 @@ const SOURCE_SHEET_HEADER_ROW = Number(process.env.SOURCE_SHEET_HEADER_ROW || 0)
 const AREAS_SHEET_NAME = process.env.AREAS_SHEET_NAME || "CCB Areas";
 const VOTES_SHEET_NAME = process.env.VOTES_SHEET_NAME || "CCB Votes";
 const PRESESSION_SHEET_NAME = process.env.PRESESSION_SHEET_NAME || "CCB PreSession";
+const CCB_DECISION_SHEET_NAME = process.env.CCB_DECISION_SHEET_NAME || "CCB_Decision";
 const GOOGLE_SHEETS_AUTH_MODE = process.env.GOOGLE_SHEETS_AUTH_MODE || "";
 const GOOGLE_SERVICE_ACCOUNT_KEY_PATH = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || "";
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
@@ -67,6 +68,22 @@ const PRESESSION_HEADERS = [
   "lastNotifiedAt",
   "respondedAt",
   "responderEmail",
+];
+const CCB_DECISION_HEADERS = [
+  "OI_ID",
+  "Open Item Description",
+  "Strategic Alignment Rationale",
+  "Strategic Alignment Score",
+  "Risk Assessment Rationale",
+  "Risk Assessment Score",
+  "Resource Impact Rationale",
+  "Resource Impact Score",
+  "Customer Value Rationale",
+  "Customer Value Score",
+  "Operational Feasibility Rationale",
+  "Operational Feasibility Score",
+  "Total",
+  "Status",
 ];
 const GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 const GOOGLE_USER_OAUTH_SCOPES = [
@@ -252,6 +269,7 @@ function persistEmployeeDirectory(directory) {
 function buildKnownContactsDirectory(areas = []) {
   const contactsByEmail = new Map();
   const contactsByName = new Map();
+  const contacts = [];
 
   const pushContact = (name, email) => {
     const normalizedName = String(name || "").trim();
@@ -275,12 +293,15 @@ function buildKnownContactsDirectory(areas = []) {
         contactsByName.set(key, contact);
       }
     }
+
+    contacts.push(contact);
   };
 
   getEmployeeDirectory().contacts.forEach((contact) => pushContact(contact.name, contact.email));
   areas.forEach((area) => pushContact(area.owner, area.email));
 
   return {
+    contacts,
     byEmail: contactsByEmail,
     byName: contactsByName,
   };
@@ -297,7 +318,49 @@ function resolveContactByValue(value, contactsDirectory) {
     return contactsDirectory.byEmail.get(normalizedEmail);
   }
 
-  return contactsDirectory.byName.get(normalizedValue.toLowerCase()) || null;
+  const exactNameMatch = contactsDirectory.byName.get(normalizedValue.toLowerCase());
+  if (exactNameMatch) {
+    return exactNameMatch;
+  }
+
+  const normalizedSearch = normalizeContactName(normalizedValue);
+  if (!normalizedSearch) {
+    return null;
+  }
+
+  const rankedMatches = (contactsDirectory.contacts || [])
+    .map((contact) => {
+      const normalizedContactName = normalizeContactName(contact.name);
+      if (!normalizedContactName) {
+        return null;
+      }
+
+      if (normalizedContactName === normalizedSearch) {
+        return { score: 4, contact };
+      }
+      if (normalizedContactName.startsWith(`${normalizedSearch} `) || normalizedContactName.endsWith(` ${normalizedSearch}`)) {
+        return { score: 3, contact };
+      }
+      if (normalizedContactName.includes(` ${normalizedSearch} `) || normalizedContactName.startsWith(normalizedSearch) || normalizedContactName.endsWith(normalizedSearch)) {
+        return { score: 2, contact };
+      }
+      if (normalizedSearch.length >= 4 && normalizedContactName.includes(normalizedSearch)) {
+        return { score: 1, contact };
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.score - left.score);
+
+  if (!rankedMatches.length) {
+    return null;
+  }
+
+  if (rankedMatches.length === 1 || rankedMatches[0].score > rankedMatches[1].score) {
+    return rankedMatches[0].contact;
+  }
+
+  return null;
 }
 
 function clearEmployeeDirectory() {
@@ -806,19 +869,23 @@ function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeContactName(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function isPreSessionCandidate(item) {
   if (!item || item.status === "closed") {
     return false;
   }
 
   const normalizedStatus = String(item.externalStatus || "").trim().toUpperCase();
-  return (
-    !normalizedStatus ||
-    normalizedStatus === "REVIEW" ||
-    normalizedStatus === "READY FOR REVIEW" ||
-    normalizedStatus === "NO LOCALIZED" ||
-    normalizedStatus === "N/A"
-  );
+  return normalizedStatus === "NEW";
 }
 
 function getPreSessionCheck(item, areaId) {
@@ -878,6 +945,14 @@ function getOwnedAreasForUser(state, user) {
   return state.areas.filter((area) => normalizeEmail(area.email) === userEmail);
 }
 
+function getPreSessionTargetAreaIds(state, item) {
+  if (!item || item.status === "closed") {
+    return [];
+  }
+
+  return (state.areas || []).map((area) => area.id).filter(Boolean);
+}
+
 function buildPreSessionOwnerView(state, user) {
   const ownedAreas = getOwnedAreasForUser(state, user);
   const areaMap = new Map(ownedAreas.map((area) => [area.id, area]));
@@ -887,8 +962,9 @@ function buildPreSessionOwnerView(state, user) {
   state.openItems
     .filter((item) => isPreSessionCandidate(item))
     .forEach((item) => {
+      const targetAreaIds = new Set(getPreSessionTargetAreaIds(state, item));
       const relevantAreaIds = new Set([
-        ...ownedAreas.map((area) => area.id),
+        ...Array.from(targetAreaIds),
         ...((item.preSessionChecks || []).map((check) => check.areaId)),
       ]);
 
@@ -920,7 +996,7 @@ function buildPreSessionOwnerView(state, user) {
 
         if (entry.decision) {
           answeredItems.push(entry);
-        } else {
+        } else if (targetAreaIds.has(areaId)) {
           pendingItems.push(entry);
         }
       });
@@ -952,8 +1028,8 @@ function buildPreSessionOwnerQueue(state) {
   state.openItems
     .filter((item) => isPreSessionCandidate(item))
     .forEach((item) => {
-      state.areas.forEach((stateArea) => {
-        const areaId = stateArea.id;
+      const targetAreaIds = getPreSessionTargetAreaIds(state, item);
+      targetAreaIds.forEach((areaId) => {
         const area = areaMap.get(areaId);
         const ownerEmail = normalizeEmail(area?.email);
         if (!area || !ownerEmail) {
@@ -1004,10 +1080,47 @@ function buildPreSessionOwnerQueue(state) {
     .sort((left, right) => right.pendingCount - left.pendingCount || left.ownerEmail.localeCompare(right.ownerEmail));
 }
 
+function buildPreSessionOpenItemQueue(state) {
+  const areaMap = buildAreaMap(state);
+
+  return state.openItems
+    .filter((item) => isPreSessionCandidate(item))
+    .map((item) => {
+      const pendingOwners = getPreSessionTargetAreaIds(state, item)
+        .map((areaId) => {
+          const area = areaMap.get(areaId);
+          const check = getPreSessionCheck(item, areaId);
+          if (!area || check?.decision) {
+            return null;
+          }
+
+          return {
+            areaId,
+            areaName: area.name,
+            ownerName: area.owner || area.name,
+            ownerEmail: area.email || "",
+          };
+        })
+        .filter(Boolean)
+        .sort((left, right) => left.areaName.localeCompare(right.areaName));
+
+      return {
+        openItemId: item.id,
+        title: item.title,
+        itemStatus: item.status || "open",
+        externalStatus: item.externalStatus || "",
+        pendingOwners,
+      };
+    })
+    .filter((item) => item.pendingOwners.length > 0)
+    .sort((left, right) => left.openItemId.localeCompare(right.openItemId));
+}
+
 function buildPreSessionDashboard(state, user) {
   return {
     ownerView: buildPreSessionOwnerView(state, user),
     ownerQueue: buildPreSessionOwnerQueue(state),
+    openItemQueue: buildPreSessionOpenItemQueue(state),
     gmailDeliveryAvailable: getGoogleSheetsStorageMode() === "user-oauth" && isUserGoogleOAuthConnected(),
   };
 }
@@ -1240,14 +1353,13 @@ function buildSnapshotFromCsv(csvText, spreadsheetTitle = "Imported Open Item Li
   const columnIndexes = new Map(headerRow.map((header, index) => [header, index]));
 
   const getValue = (row, header) => row[columnIndexes.get(header)] || "";
+  const buildSnapshotRow = (row) => {
+    const record = Object.fromEntries(
+      headerRow.map((header) => [header, getValue(row, header)]),
+    );
 
-  const snapshot = {
-    spreadsheetId: SOURCE_SPREADSHEET_ID,
-    spreadsheetTitle: spreadsheetTitle || "",
-    sheetName: SOURCE_SHEET_NAME,
-    importedAt: new Date().toISOString(),
-    headers: headerRow,
-    rows: bodyRows.map((row) => ({
+    return {
+      ...record,
       id: getValue(row, "ID"),
       description: getValue(row, "Open Item Description"),
       owner: getValue(row, "Owner"),
@@ -1255,23 +1367,21 @@ function buildSnapshotFromCsv(csvText, spreadsheetTitle = "Imported Open Item Li
       dueDate: getValue(row, "Due Date"),
       status: getValue(row, "Status"),
       comments: getValue(row, "Comments/Updates"),
-      Software: getValue(row, "Software"),
-      Product: getValue(row, "Product"),
-      Quality: getValue(row, "Quality"),
-      Machine: getValue(row, "Machine"),
-      Testing: getValue(row, "Testing"),
-      Infra: getValue(row, "Infra"),
-      Optics: getValue(row, "Optics"),
-      Data: getValue(row, "Data"),
-      Research: getValue(row, "Research"),
-      Exploration: getValue(row, "Exploration"),
-      Mecha: getValue(row, "Mecha"),
       minutesRelated: getValue(row, "Minutes Related"),
       gitRepository: getValue(row, "Git Repository"),
       ccbScore: getValue(row, "CCB Score"),
       ccbStatus: getValue(row, "CCB Status"),
       jiraTicketsRelated: getValue(row, "Jira Tickets Related"),
-    })),
+    };
+  };
+
+  const snapshot = {
+    spreadsheetId: SOURCE_SPREADSHEET_ID,
+    spreadsheetTitle: spreadsheetTitle || "",
+    sheetName: SOURCE_SHEET_NAME,
+    importedAt: new Date().toISOString(),
+    headers: headerRow,
+    rows: bodyRows.map(buildSnapshotRow),
   };
 
   writeJson(GOOGLE_SNAPSHOT_FILE, snapshot);
@@ -1469,6 +1579,28 @@ function getOpenItemSheetContext(values) {
   };
 }
 
+function findDecisionHeaderRowIndex(values) {
+  return values.findIndex((row) => {
+    const normalized = row.map((cell) => String(cell || "").trim());
+    return normalized.includes("OI_ID") && normalized.includes("Open Item Description");
+  });
+}
+
+function getDecisionSheetContext(values) {
+  const headerRowIndex = findDecisionHeaderRowIndex(values);
+  if (headerRowIndex < 0 || !values[headerRowIndex]) {
+    throw new Error(`No se pudo detectar la tabla de ${CCB_DECISION_SHEET_NAME}. Debe existir una fila con 'OI_ID' y 'Open Item Description'.`);
+  }
+
+  const headerRow = values[headerRowIndex].map((cell) => String(cell || "").trim());
+  return {
+    headerRowIndex,
+    headerRowNumber: headerRowIndex + 1,
+    headerRow,
+    bodyRows: values.slice(headerRowIndex + 1),
+  };
+}
+
 function formatMexicoCityDateTime(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -1513,6 +1645,31 @@ function buildOpenItemHeaders(state, areas) {
     .forEach((area) => headerSet.add(area.sourceColumn));
 
   return Array.from(headerSet);
+}
+
+function buildManagedOpenItemHeaders(areas) {
+  const managedHeaders = new Set([
+    "ID",
+    "Open Item Description",
+    "Owner",
+    "Date Created",
+    "Due Date",
+    "Status",
+    "Comments/Updates",
+  ]);
+
+  areas
+    .filter((area) => area.sourceColumn)
+    .forEach((area) => managedHeaders.add(area.sourceColumn));
+
+  return managedHeaders;
+}
+
+function buildManagedDecisionHeaders() {
+  return new Set([
+    "OI_ID",
+    "Open Item Description",
+  ]);
 }
 
 function parseAreasSheetRows(values) {
@@ -1610,15 +1767,15 @@ function buildOpenItemsRowsFromState(state, areas) {
 
     areaColumns.forEach((area) => {
       const preSessionCheck = getPreSessionCheck(item, area.id);
+      if (preSessionCheck?.decision === "impact") {
+        baseRow[area.sourceColumn] = true;
+        return;
+      }
+      if (preSessionCheck?.decision === "no-impact") {
+        baseRow[area.sourceColumn] = false;
+        return;
+      }
       if (isPreSessionCandidate(item)) {
-        if (preSessionCheck?.decision === "impact") {
-          baseRow[area.sourceColumn] = true;
-          return;
-        }
-        if (preSessionCheck?.decision === "no-impact") {
-          baseRow[area.sourceColumn] = false;
-          return;
-        }
         baseRow[area.sourceColumn] = "";
         return;
       }
@@ -1680,6 +1837,49 @@ function buildPreSessionSheetRows(state) {
   });
 
   return [PRESESSION_HEADERS, ...rows];
+}
+
+function parseDecisionSheetRows(values) {
+  const context = getDecisionSheetContext(values);
+  const records = buildSheetValuesMap([context.headerRow, ...context.bodyRows]);
+  const rowsByOpenItemId = new Map();
+
+  records.forEach((record) => {
+    const openItemId = String(record.OI_ID || "").trim();
+    if (!openItemId) {
+      return;
+    }
+    rowsByOpenItemId.set(openItemId, record);
+  });
+
+  return {
+    context,
+    rowsByOpenItemId,
+  };
+}
+
+function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map()) {
+  const rows = state.openItems.map((item) => {
+    const existingRecord = existingRowsByOpenItemId.get(item.id) || {};
+    const baseRecord = {};
+
+    CCB_DECISION_HEADERS.forEach((header) => {
+      baseRecord[header] = String(existingRecord[header] || "").trim();
+    });
+
+    baseRecord.OI_ID = item.id || "";
+    baseRecord["Open Item Description"] = item.title || "";
+    if (!baseRecord.Status && item.externalStatus) {
+      baseRecord.Status = item.externalStatus;
+    }
+    if (!baseRecord.Total && item.ccbScore) {
+      baseRecord.Total = item.ccbScore;
+    }
+
+    return CCB_DECISION_HEADERS.map((header) => baseRecord[header] || "");
+  });
+
+  return [CCB_DECISION_HEADERS, ...rows];
 }
 
 function loadServiceAccountCredentials() {
@@ -1766,6 +1966,27 @@ async function fetchSnapshotFromGoogleSheetsApi() {
   const bodyRows = context.bodyRows;
   const columnIndexes = new Map(headerRow.map((header, index) => [header, index]));
   const getValue = (row, header) => row[columnIndexes.get(header)] || "";
+  const buildSnapshotRow = (row) => {
+    const record = Object.fromEntries(
+      headerRow.map((header) => [header, getValue(row, header)]),
+    );
+
+    return {
+      ...record,
+      id: getValue(row, "ID"),
+      description: getValue(row, "Open Item Description"),
+      owner: getValue(row, "Owner"),
+      dateCreated: getValue(row, "Date Created"),
+      dueDate: getValue(row, "Due Date"),
+      status: getValue(row, "Status"),
+      comments: getValue(row, "Comments/Updates"),
+      minutesRelated: getValue(row, "Minutes Related"),
+      gitRepository: getValue(row, "Git Repository"),
+      ccbScore: getValue(row, "CCB Score"),
+      ccbStatus: getValue(row, "CCB Status"),
+      jiraTicketsRelated: getValue(row, "Jira Tickets Related"),
+    };
+  };
   const matchedSheet = Array.isArray(metadata.sheets)
     ? metadata.sheets.find((sheet) => sheet.properties?.title === SOURCE_SHEET_NAME)
     : null;
@@ -1779,43 +2000,22 @@ async function fetchSnapshotFromGoogleSheetsApi() {
     headerRowNumber: context.headerRowNumber,
     importedAt: new Date().toISOString(),
     headers: headerRow,
-    rows: bodyRows.map((row) => ({
-      id: getValue(row, "ID"),
-      description: getValue(row, "Open Item Description"),
-      owner: getValue(row, "Owner"),
-      dateCreated: getValue(row, "Date Created"),
-      dueDate: getValue(row, "Due Date"),
-      status: getValue(row, "Status"),
-      comments: getValue(row, "Comments/Updates"),
-      Software: getValue(row, "Software"),
-      Product: getValue(row, "Product"),
-      Quality: getValue(row, "Quality"),
-      Machine: getValue(row, "Machine"),
-      Testing: getValue(row, "Testing"),
-      Infra: getValue(row, "Infra"),
-      Optics: getValue(row, "Optics"),
-      Data: getValue(row, "Data"),
-      Research: getValue(row, "Research"),
-      Exploration: getValue(row, "Exploration"),
-      Mecha: getValue(row, "Mecha"),
-      minutesRelated: getValue(row, "Minutes Related"),
-      gitRepository: getValue(row, "Git Repository"),
-      ccbScore: getValue(row, "CCB Score"),
-      ccbStatus: getValue(row, "CCB Status"),
-      jiraTicketsRelated: getValue(row, "Jira Tickets Related"),
-    })),
+    rows: bodyRows.map(buildSnapshotRow),
   };
 
   writeJson(GOOGLE_SNAPSHOT_FILE, snapshot);
   return snapshot;
 }
 
-async function batchGetSpreadsheetValues(ranges) {
+async function batchGetSpreadsheetValues(ranges, valueRenderOption = "") {
   const spreadsheetId = SOURCE_SPREADSHEET_ID;
   const query = ranges
     .map((range) => `ranges=${encodeURIComponent(range)}`)
     .join("&");
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${query}`;
+  const renderOptionQuery = valueRenderOption
+    ? `&valueRenderOption=${encodeURIComponent(valueRenderOption)}`
+    : "";
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${query}${renderOptionQuery}`;
   const payload = await fetchGoogleSheetsJson(url);
   const valueRanges = Array.isArray(payload.valueRanges) ? payload.valueRanges : [];
   const results = new Map();
@@ -1825,6 +2025,58 @@ async function batchGetSpreadsheetValues(ranges) {
   });
 
   return results;
+}
+
+function preserveOpenItemFormulaCells(rows, existingDisplayValues, existingFormulaValues, areas) {
+  if (!rows.length) {
+    return rows;
+  }
+
+  const displayContext = getOpenItemSheetContext(existingDisplayValues);
+  const formulaContext = getOpenItemSheetContext(existingFormulaValues);
+  const managedHeaders = buildManagedOpenItemHeaders(areas);
+
+  return rows.map((row, rowIndex) => {
+    const formulaRow = formulaContext.bodyRows[rowIndex] || [];
+    return row.map((cellValue, columnIndex) => {
+      const header = displayContext.headerRow[columnIndex] || "";
+      const formulaValue = formulaRow[columnIndex];
+      if (
+        !managedHeaders.has(header) &&
+        typeof formulaValue === "string" &&
+        formulaValue.trim().startsWith("=")
+      ) {
+        return formulaValue;
+      }
+      return cellValue;
+    });
+  });
+}
+
+function preserveDecisionFormulaCells(rows, existingDisplayValues, existingFormulaValues) {
+  if (!rows.length) {
+    return rows;
+  }
+
+  const displayContext = getDecisionSheetContext(existingDisplayValues);
+  const formulaContext = getDecisionSheetContext(existingFormulaValues);
+  const managedHeaders = buildManagedDecisionHeaders();
+
+  return rows.map((row, rowIndex) => {
+    const formulaRow = formulaContext.bodyRows[rowIndex] || [];
+    return row.map((cellValue, columnIndex) => {
+      const header = displayContext.headerRow[columnIndex] || "";
+      const formulaValue = formulaRow[columnIndex];
+      if (
+        !managedHeaders.has(header) &&
+        typeof formulaValue === "string" &&
+        formulaValue.trim().startsWith("=")
+      ) {
+        return formulaValue;
+      }
+      return cellValue;
+    });
+  });
 }
 
 async function fetchSpreadsheetMetadata() {
@@ -1962,10 +2214,10 @@ async function batchUpdateSpreadsheet(requests) {
   }
 }
 
-async function writeSheetRange(sheetRange, rows) {
+async function writeSheetRange(sheetRange, rows, valueInputOption = "RAW") {
   const updateUrl =
     `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
-    `/values/${encodeURIComponent(sheetRange)}?valueInputOption=RAW`;
+    `/values/${encodeURIComponent(sheetRange)}?valueInputOption=${encodeURIComponent(valueInputOption)}`;
   const updateHeaders = await getGoogleRequestHeaders(updateUrl);
   const updateResponse = await fetch(updateUrl, {
     method: "PUT",
@@ -2033,24 +2285,10 @@ async function applyPeopleChipUpdates(sheetId, chipUpdates) {
   await batchUpdateSpreadsheet(requests);
 }
 
-async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, endRow) {
+async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, endRow, checkboxColumns = []) {
   if (!sheetId || endRow < startRow) {
     return;
   }
-
-  const checkboxColumns = [
-    "Software",
-    "Product",
-    "Quality",
-    "Machine",
-    "Testing",
-    "Infra",
-    "Optics",
-    "Data",
-    "Research",
-    "Exploration",
-    "Mecha",
-  ];
 
   const requests = checkboxColumns
     .map((header) => ({
@@ -2094,6 +2332,9 @@ async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, en
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
+    if (response.status === 400 && detail.includes("not allowed on cells in typed columns")) {
+      return;
+    }
     throw new Error(`Google Sheets batchUpdate error ${response.status}${detail ? `: ${detail}` : ""}`);
   }
 }
@@ -2105,7 +2346,7 @@ function getSheetMetadataByName(metadata, sheetName) {
 }
 
 async function applyOpenItemOwnerPeopleChips(sheetId, headerRow, startRow, state) {
-  if (!sheetId) {
+  if (sheetId == null) {
     return;
   }
 
@@ -2135,7 +2376,7 @@ async function applyOpenItemOwnerPeopleChips(sheetId, headerRow, startRow, state
 async function applyAreaOwnerPeopleChips(metadata, areas) {
   const matchedSheet = getSheetMetadataByName(metadata, AREAS_SHEET_NAME);
   const sheetId = matchedSheet?.properties?.sheetId ?? null;
-  if (!sheetId) {
+  if (sheetId == null) {
     return;
   }
 
@@ -2162,14 +2403,23 @@ async function applyAreaOwnerPeopleChips(metadata, areas) {
 }
 
 async function writeOpenItemsSheetPreservingTemplate(rows, state) {
-  const [valuesMap, metadata] = await Promise.all([
+  const [valuesMap, formulaMap, metadata] = await Promise.all([
     batchGetSpreadsheetValues([SOURCE_SHEET_NAME]),
+    batchGetSpreadsheetValues([SOURCE_SHEET_NAME], "FORMULA"),
     fetchSpreadsheetMetadata(),
   ]);
   const existingValues = valuesMap.get(SOURCE_SHEET_NAME) || [];
+  const existingFormulaValues = formulaMap.get(SOURCE_SHEET_NAME) || [];
   const context = getOpenItemSheetContext(existingValues);
   const matchedSheet = getSheetMetadataByName(metadata, SOURCE_SHEET_NAME);
   const sheetId = matchedSheet?.properties?.sheetId ?? null;
+  const checkboxColumns = Array.from(
+    new Set(
+      (state.areas || [])
+        .map((area) => String(area?.sourceColumn || "").trim())
+        .filter(Boolean),
+    ),
+  );
   const headerWidth = Math.max(context.headerRow.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
   const existingDataRowCount = Math.max(0, existingValues.length - context.headerRowNumber);
   const targetRowCount = Math.max(existingDataRowCount, rows.length, 1);
@@ -2177,16 +2427,57 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
   const endRow = startRow + targetRowCount - 1;
   const endColumn = toA1Column(Math.max(0, headerWidth - 1));
   const clearRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${endRow}`;
+  const nextRows = preserveOpenItemFormulaCells(rows, existingValues, existingFormulaValues, state.areas || []);
 
   await clearSheetRange(clearRange);
 
-  if (rows.length) {
-    const writeRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${startRow + rows.length - 1}`;
-    await writeSheetRange(writeRange, rows);
+  if (nextRows.length) {
+    const writeRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${startRow + nextRows.length - 1}`;
+    await writeSheetRange(writeRange, nextRows, "USER_ENTERED");
   }
 
-  await applyOpenItemsCheckboxValidation(sheetId, context.headerRow, startRow, endRow);
+  await applyOpenItemsCheckboxValidation(sheetId, context.headerRow, startRow, endRow, checkboxColumns);
   await applyOpenItemOwnerPeopleChips(sheetId, context.headerRow, startRow, state);
+}
+
+async function writeDecisionSheetPreservingTemplate(state) {
+  const [valuesMap, formulaMap, metadata] = await Promise.all([
+    batchGetSpreadsheetValues([CCB_DECISION_SHEET_NAME]),
+    batchGetSpreadsheetValues([CCB_DECISION_SHEET_NAME], "FORMULA"),
+    fetchSpreadsheetMetadata(),
+  ]);
+  const existingValues = valuesMap.get(CCB_DECISION_SHEET_NAME) || [];
+  const existingFormulaValues = formulaMap.get(CCB_DECISION_SHEET_NAME) || [];
+  if (!existingValues.length) {
+    return;
+  }
+
+  const { context, rowsByOpenItemId } = parseDecisionSheetRows(existingValues);
+  const matchedSheet = getSheetMetadataByName(metadata, CCB_DECISION_SHEET_NAME);
+  const sheetId = matchedSheet?.properties?.sheetId ?? null;
+  if (sheetId == null) {
+    return;
+  }
+
+  const decisionRows = buildDecisionSheetRows(state, rowsByOpenItemId);
+  const nextDecisionRows = preserveDecisionFormulaCells(decisionRows.slice(1), existingValues, existingFormulaValues);
+  const headerWidth = Math.max(
+    context.headerRow.length,
+    decisionRows.reduce((max, row) => Math.max(max, row.length), 0),
+  );
+  const existingDataRowCount = Math.max(0, existingValues.length - context.headerRowNumber);
+  const targetRowCount = Math.max(existingDataRowCount, nextDecisionRows.length, 1);
+  const startRow = context.headerRowNumber + 1;
+  const endRow = startRow + targetRowCount - 1;
+  const endColumn = toA1Column(Math.max(0, headerWidth - 1));
+  const clearRange = `${CCB_DECISION_SHEET_NAME}!A${startRow}:${endColumn}${endRow}`;
+
+  await clearSheetRange(clearRange);
+
+  if (nextDecisionRows.length) {
+    const writeRange = `${CCB_DECISION_SHEET_NAME}!A${startRow}:${endColumn}${startRow + nextDecisionRows.length - 1}`;
+    await writeSheetRange(writeRange, nextDecisionRows, "USER_ENTERED");
+  }
 }
 
 async function loadStateFromGoogleSheets() {
@@ -2223,6 +2514,7 @@ async function loadStateFromGoogleSheets() {
     headers: openItemContext.headerRow || OPEN_ITEM_HEADERS,
     headerRowNumber: openItemContext.headerRowNumber,
     rows: buildSheetValuesMap([openItemContext.headerRow, ...openItemContext.bodyRows]).map((record) => ({
+      ...record,
       id: record.ID || "",
       description: record["Open Item Description"] || "",
       owner: record.Owner || "",
@@ -2230,17 +2522,6 @@ async function loadStateFromGoogleSheets() {
       dueDate: record["Due Date"] || "",
       status: record.Status || "",
       comments: record["Comments/Updates"] || "",
-      Software: record.Software || "",
-      Product: record.Product || "",
-      Quality: record.Quality || "",
-      Machine: record.Machine || "",
-      Testing: record.Testing || "",
-      Infra: record.Infra || "",
-      Optics: record.Optics || "",
-      Data: record.Data || "",
-      Research: record.Research || "",
-      Exploration: record.Exploration || "",
-      Mecha: record.Mecha || "",
       minutesRelated: record["Minutes Related"] || "",
       gitRepository: record["Git Repository"] || "",
       ccbScore: record["CCB Score"] || "",
@@ -2277,13 +2558,14 @@ async function persistStateToGoogleSheets(nextState) {
   const voteRows = buildVotesSheetRows(normalizedState);
   const preSessionRows = buildPreSessionSheetRows(normalizedState);
 
-  await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME, PRESESSION_SHEET_NAME]);
+  await ensureSpreadsheetSheets([AREAS_SHEET_NAME, VOTES_SHEET_NAME, PRESESSION_SHEET_NAME, CCB_DECISION_SHEET_NAME]);
   await writeOpenItemsSheetPreservingTemplate(openItemRows, normalizedState);
   await Promise.all([
     clearAndWriteSheet(AREAS_SHEET_NAME, areaRows),
     clearAndWriteSheet(VOTES_SHEET_NAME, voteRows),
     clearAndWriteSheet(PRESESSION_SHEET_NAME, preSessionRows),
   ]);
+  await writeDecisionSheetPreservingTemplate(normalizedState);
   await applyAreaOwnerPeopleChips(await fetchSpreadsheetMetadata(), areas);
 
   return loadStateFromGoogleSheets();
@@ -2637,7 +2919,8 @@ const server = http.createServer(async (request, response) => {
 
       const item = state.openItems.find((candidate) => candidate.id === openItemId);
       const hasExistingCheck = Boolean(item && getPreSessionCheck(item, areaId));
-      if (!item || (!isPreSessionCandidate(item) && !item.impactedAreaIds.includes(areaId) && !hasExistingCheck)) {
+      const targetAreaIds = item ? new Set(getPreSessionTargetAreaIds(state, item)) : new Set();
+      if (!item || (!targetAreaIds.has(areaId) && !hasExistingCheck)) {
         sendJson(response, 404, {
           error: "Not found",
           detail: "No encontre ese open item impactando el area indicada.",

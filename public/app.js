@@ -118,6 +118,8 @@ let authConfig = null;
 let importedContacts = [];
 let preSessionDashboard = null;
 let autoSavePromise = null;
+let selectedPreSessionJobOpenItemId = "";
+let selectedDailyReportOpenItemId = "";
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
 
 function apiUrl(path) {
@@ -428,6 +430,7 @@ function renderEmployeesImportStatus(directory = {}) {
 function renderPreSessionDashboard() {
   const ownerView = preSessionDashboard?.ownerView || { ownedAreas: [], pendingItems: [], answeredItems: [] };
   const ownerQueue = Array.isArray(preSessionDashboard?.ownerQueue) ? preSessionDashboard.ownerQueue : [];
+  const openItemQueue = Array.isArray(preSessionDashboard?.openItemQueue) ? preSessionDashboard.openItemQueue : [];
   const gmailDeliveryAvailable = Boolean(preSessionDashboard?.gmailDeliveryAvailable);
   const ownedAreas = ownerView.ownedAreas || [];
   const pendingItems = ownerView.pendingItems || [];
@@ -480,17 +483,63 @@ function renderPreSessionDashboard() {
     : "<p class=\"meta-line\">Todavia no has respondido revisiones.</p>";
 
   preSessionJobSummary.dataset.mode = gmailDeliveryAvailable ? "google-sheets" : "local";
+  const totalPendingEvaluations = openItemQueue.reduce((total, item) => total + item.pendingOwners.length, 0);
   preSessionJobSummary.innerHTML = [
     `<div><strong>Owners pendientes:</strong> ${ownerQueue.length}</div>`,
-    `<div><strong>Open items sin respuesta:</strong> ${ownerQueue.reduce((total, owner) => total + Number(owner.pendingCount || 0), 0)}</div>`,
+    `<div><strong>Open items con evaluacion pendiente:</strong> ${openItemQueue.length}</div>`,
+    `<div><strong>Evaluaciones pendientes:</strong> ${totalPendingEvaluations}</div>`,
     `<div><strong>Envio Gmail:</strong> ${gmailDeliveryAvailable ? "Disponible con tu OAuth conectado" : "No disponible, el job generara preview si falta autorizacion"}</div>`,
   ].join("");
 
-  if (!preSessionJobStatus.textContent.trim()) {
-    preSessionJobStatus.textContent = ownerQueue.length
-      ? ownerQueue.map((owner) => `- ${owner.ownerEmail}: ${owner.pendingCount} pendiente(s)`).join("\n")
-      : "No hay owners con solicitudes pendientes.";
+  if (openItemQueue.length && !openItemQueue.some((item) => item.openItemId === selectedPreSessionJobOpenItemId)) {
+    selectedPreSessionJobOpenItemId = openItemQueue[0].openItemId;
   }
+  if (!openItemQueue.length) {
+    selectedPreSessionJobOpenItemId = "";
+  }
+
+  const selectedJobItem = openItemQueue.find((item) => item.openItemId === selectedPreSessionJobOpenItemId) || openItemQueue[0] || null;
+
+  preSessionJobStatus.innerHTML = openItemQueue.length
+    ? `
+        <div class="presession-job-tabs" role="tablist" aria-label="Open items pendientes">
+          ${openItemQueue.map((item) => `
+            <button
+              type="button"
+              class="presession-job-tab${selectedJobItem?.openItemId === item.openItemId ? " is-active" : ""}"
+              data-presession-job-tab="${escapeHtml(item.openItemId)}"
+            >
+              <span>${escapeHtml(item.openItemId)}</span>
+              <strong>${item.pendingOwners.length}</strong>
+            </button>
+          `).join("")}
+        </div>
+        <article class="presession-job-card">
+          <div class="presession-card-top">
+            <div>
+              <p class="presession-eyebrow">${escapeHtml(selectedJobItem.externalStatus || selectedJobItem.itemStatus || "open")}</p>
+              <h3>${escapeHtml(selectedJobItem.openItemId)} · ${escapeHtml(selectedJobItem.title)}</h3>
+            </div>
+            <span class="badge">${selectedJobItem.pendingOwners.length} pendiente(s)</span>
+          </div>
+          <div class="presession-owner-list presession-owner-list--matrix">
+            ${selectedJobItem.pendingOwners.map((owner) => `
+              <div class="presession-owner-row presession-owner-row--compact">
+                <strong>${escapeHtml(owner.areaName)}</strong>
+                <span>${escapeHtml(owner.ownerName || owner.ownerEmail || "Sin owner")}</span>
+              </div>
+            `).join("")}
+          </div>
+        </article>
+      `
+    : "<p class=\"meta-line\">No hay owners con solicitudes pendientes.</p>";
+
+  preSessionJobStatus.querySelectorAll("[data-presession-job-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedPreSessionJobOpenItemId = button.dataset.presessionJobTab || "";
+      renderPreSessionDashboard();
+    });
+  });
 
   preSessionPendingList.querySelectorAll("[data-presession-respond]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -581,18 +630,22 @@ function renderAreas() {
     card.className = "area-editor-card";
     card.innerHTML = `
       <div class="area-editor-head">
-        <div>
-          <h3>${area.name}</h3>
-          <p class="meta-line">${area.sourceColumn || area.id}</p>
-        </div>
+        <div class="area-editor-title"></div>
         <span class="chip">${area.id}</span>
       </div>
       <div class="area-editor-grid">
         <div class="autocomplete-shell">
-          <input data-area-field="owner" data-area-id="${area.id}" data-role="owner" placeholder="Owner" value="${area.owner || ""}" autocomplete="off" />
+          <input
+            data-area-field="owner"
+            data-area-id="${area.id}"
+            data-role="owner"
+            placeholder="Owner / assignee"
+            value="${area.owner || ""}"
+            autocomplete="off"
+            title="${area.email || ""}"
+          />
           <div class="autocomplete-list" data-owner-autocomplete="${area.id}" hidden></div>
         </div>
-        <input data-area-field="email" data-area-id="${area.id}" data-role="email" list="email-suggestions" type="email" placeholder="Email del owner" value="${area.email || ""}" />
       </div>
     `;
     areasList.appendChild(card);
@@ -622,26 +675,21 @@ function renderAreas() {
         const contact = findContactByName(area.owner);
         if (contact?.email) {
           area.email = contact.email;
-          const emailInput = areasList.querySelector(`[data-area-field="email"][data-area-id="${area.id}"]`);
-          if (emailInput) {
-            emailInput.value = contact.email;
+          event.currentTarget.title = contact.email;
+        } else {
+          event.currentTarget.title = area.email || "";
+        }
+
+        if (!contact?.email) {
+          const contactByEmail = findContactByEmail(area.email);
+          if (!contactByEmail) {
+            area.email = area.email || "";
           }
         }
 
         const dropdown = areasList.querySelector(`[data-owner-autocomplete="${area.id}"]`);
         if (dropdown) {
           renderOwnerAutocomplete(dropdown, area.id, area.owner);
-        }
-      }
-
-      if (field === "email") {
-        const contact = findContactByEmail(area.email);
-        if (contact?.name) {
-          area.owner = contact.name;
-          const ownerInput = areasList.querySelector(`[data-area-field="owner"][data-area-id="${area.id}"]`);
-          if (ownerInput) {
-            ownerInput.value = contact.name;
-          }
         }
       }
     });
@@ -828,6 +876,133 @@ function buildDailyReportText(prerequisite) {
   ].join("\n");
 }
 
+function buildDailyReportModel(prerequisite) {
+  const today = new Date().toISOString().slice(0, 10);
+  const todaysVotes = [];
+
+  state.openItems.forEach((item) => {
+    item.votes.forEach((vote) => {
+      if ((vote.createdAt || "").startsWith(today)) {
+        const area = state.areas.find((candidate) => candidate.id === vote.areaId);
+        todaysVotes.push({
+          openItemId: item.id,
+          title: item.title,
+          decision: vote.decision,
+          areaName: area?.name || vote.areaId,
+          ownerName: area?.owner || "Unknown",
+        });
+      }
+    });
+  });
+
+  const ccbAgenda = state.openItems
+    .filter((item) => item.status !== "closed")
+    .filter((item) => item.isSubstantial || item.votes.some((vote) => vote.decision !== "approve"))
+    .map((item) => {
+      const impactedAreas = impactedAreaNames(item).split(", ").filter(Boolean);
+      const pendingAreaIds = item.impactedAreaIds.filter(
+        (areaId) => !item.votes.some((vote) => vote.areaId === areaId && vote.decision === "approve"),
+      );
+      const pendingAreas = pendingAreaIds
+        .map((areaId) => state.areas.find((area) => area.id === areaId)?.name || areaId)
+        .filter(Boolean);
+
+      return {
+        openItemId: item.id,
+        title: item.title,
+        impactedAreas,
+        pendingAreas,
+        isSubstantial: Boolean(item.isSubstantial),
+      };
+    });
+
+  return {
+    date: today,
+    prerequisite,
+    todaysVotes,
+    ccbAgenda,
+  };
+}
+
+function renderDailyReport(prerequisite) {
+  const report = buildDailyReportModel(prerequisite);
+  dailyReport.dataset.copyText = buildDailyReportText(prerequisite);
+
+  if (report.ccbAgenda.length && !report.ccbAgenda.some((item) => item.openItemId === selectedDailyReportOpenItemId)) {
+    selectedDailyReportOpenItemId = report.ccbAgenda[0].openItemId;
+  }
+  if (!report.ccbAgenda.length) {
+    selectedDailyReportOpenItemId = "";
+  }
+
+  const selectedAgendaItem = report.ccbAgenda.find((item) => item.openItemId === selectedDailyReportOpenItemId) || report.ccbAgenda[0] || null;
+
+  dailyReport.innerHTML = `
+    <div class="daily-report-shell">
+      <div class="daily-report-meta">
+        <span><strong>Fecha:</strong> ${escapeHtml(report.date)}</span>
+        <span><strong>Prerequisito:</strong> ${escapeHtml(report.prerequisite.label)}</span>
+        <span><strong>Votaciones nuevas:</strong> ${report.todaysVotes.length}</span>
+        <span><strong>Tickets CCB:</strong> ${report.ccbAgenda.length}</span>
+      </div>
+      ${report.todaysVotes.length ? `
+        <div class="daily-report-votes">
+          ${report.todaysVotes.map((vote) => `
+            <div class="daily-report-vote">
+              <strong>${escapeHtml(vote.openItemId)}</strong>
+              <span>${escapeHtml(vote.areaName)} · ${escapeHtml(vote.decision)}</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : "<p class=\"meta-line\">Sin votaciones nuevas hoy.</p>"}
+      ${selectedAgendaItem ? `
+        <div class="daily-report-tabs" role="tablist" aria-label="Agenda CCB">
+          ${report.ccbAgenda.map((item) => `
+            <button
+              type="button"
+              class="daily-report-tab${selectedAgendaItem.openItemId === item.openItemId ? " is-active" : ""}"
+              data-daily-report-tab="${escapeHtml(item.openItemId)}"
+            >
+              <span>${escapeHtml(item.openItemId)}</span>
+              <strong>${item.pendingAreas.length || item.impactedAreas.length}</strong>
+            </button>
+          `).join("")}
+        </div>
+        <article class="daily-report-card">
+          <div class="presession-card-top">
+            <div>
+              <p class="presession-eyebrow">${selectedAgendaItem.isSubstantial ? "SUBSTANTIAL" : "CCB"}</p>
+              <h3>${escapeHtml(selectedAgendaItem.openItemId)} · ${escapeHtml(selectedAgendaItem.title)}</h3>
+            </div>
+            <span class="badge">${selectedAgendaItem.pendingAreas.length || selectedAgendaItem.impactedAreas.length} area(s)</span>
+          </div>
+          <div class="daily-report-columns">
+            <div class="daily-report-column">
+              <p class="field-label">Impacto</p>
+              <div class="daily-report-chip-list">
+                ${(selectedAgendaItem.impactedAreas.length ? selectedAgendaItem.impactedAreas : ["Sin areas"]).map((area) => `<span class="chip">${escapeHtml(area)}</span>`).join("")}
+              </div>
+            </div>
+            <div class="daily-report-column">
+              <p class="field-label">Pendientes</p>
+              <div class="daily-report-chip-list">
+                ${(selectedAgendaItem.pendingAreas.length ? selectedAgendaItem.pendingAreas : ["Sin pendientes"]).map((area) => `<span class="chip">${escapeHtml(area)}</span>`).join("")}
+              </div>
+            </div>
+          </div>
+        </article>
+      ` : "<p class=\"meta-line\">Sin temas pendientes para sesion CCB.</p>"}
+    </div>
+  `;
+
+  dailyReport.querySelectorAll("[data-daily-report-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedDailyReportOpenItemId = button.dataset.dailyReportTab || "";
+      renderDailyReport(prerequisite);
+    });
+  });
+}
+
 function derivePrerequisiteLocally() {
   const activeItems = state.openItems.filter((item) => item.status !== "closed");
   const substantialItems = activeItems.filter((item) => item.isSubstantial);
@@ -870,7 +1045,7 @@ function refreshDerivedViews() {
   renderOpenItems();
   renderSourceStatus();
   updateNextOpenItemSuggestion();
-  dailyReport.textContent = buildDailyReportText(prerequisite);
+  renderDailyReport(prerequisite);
 }
 
 async function saveState() {
@@ -913,7 +1088,7 @@ async function loadState() {
   renderAreas();
   renderOpenItems();
   renderSourceStatus();
-  dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+  renderDailyReport(payload.prerequisite);
   await loadPreSessionDashboard();
 }
 
@@ -1081,11 +1256,11 @@ async function applyImportedPayload(response) {
   renderAreas();
   renderOpenItems();
   renderSourceStatus();
-  dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+  renderDailyReport(payload.prerequisite);
   await loadPreSessionDashboard();
 }
 
-openItemForm.addEventListener("submit", (event) => {
+openItemForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(event.currentTarget);
   const impactedAreaIds = Array.from(
@@ -1093,7 +1268,7 @@ openItemForm.addEventListener("submit", (event) => {
     (checkbox) => checkbox.value,
   );
 
-  state.openItems.push({
+  const nextOpenItem = {
     id: String(formData.get("id")).trim(),
     title: String(formData.get("title")).trim(),
     description: String(formData.get("description")).trim(),
@@ -1106,16 +1281,26 @@ openItemForm.addEventListener("submit", (event) => {
     status: String(formData.get("status")).trim(),
     createdAt: new Date().toISOString(),
     dueDate: "",
-    externalStatus: "",
+    externalStatus: "NEW",
     ccbScore: "",
     rawSheetRow: null,
     preSessionChecks: [],
     votes: [],
-  });
+  };
+
+  state.openItems.push(nextOpenItem);
 
   event.currentTarget.reset();
   updateNextOpenItemSuggestion(true);
   refreshDerivedViews();
+
+  try {
+    await saveState();
+  } catch (error) {
+    state.openItems = state.openItems.filter((item) => item !== nextOpenItem);
+    refreshDerivedViews();
+    window.alert(error.message || "No se pudo crear el open item en Google Sheets.");
+  }
 });
 
 document.getElementById("save-state").addEventListener("click", async () => {
@@ -1135,7 +1320,7 @@ document.getElementById("update-owners-button").addEventListener("click", async 
 });
 
 document.getElementById("copy-report").addEventListener("click", async () => {
-  await navigator.clipboard.writeText(dailyReport.textContent);
+  await navigator.clipboard.writeText(dailyReport.dataset.copyText || dailyReport.textContent);
 });
 
 document.getElementById("export-state").addEventListener("click", () => {
@@ -1308,7 +1493,7 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
     renderAreas();
     renderOpenItems();
     renderSourceStatus();
-    dailyReport.textContent = buildDailyReportText(payload.prerequisite);
+    renderDailyReport(payload.prerequisite);
     await loadPreSessionDashboard();
   } catch (error) {
     window.alert(error.message || "No se pudo ejecutar la sincronizacion.");

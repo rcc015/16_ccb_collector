@@ -414,7 +414,11 @@ h3 {
 .reference-list,
 .presession-list {
   display: grid;
-  gap: 1rem;
+  gap: 0.85rem;
+}
+
+.area-editor-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .area-editor-card,
@@ -425,7 +429,8 @@ h3 {
 }
 
 .area-editor-card {
-  gap: 1rem;
+  gap: 0.85rem;
+  padding: 1.1rem 1.2rem;
 }
 
 .area-editor-head,
@@ -435,6 +440,10 @@ h3 {
   justify-content: space-between;
   align-items: flex-start;
   gap: 1rem;
+}
+
+.area-editor-title {
+  min-width: 0;
 }
 
 .area-editor-head p,
@@ -447,10 +456,30 @@ h3 {
   text-transform: uppercase;
 }
 
+.area-editor-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 700;
+  color: var(--ink-strong);
+}
+
 .area-editor-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.85rem;
+}
+
+.area-editor-grid input {
+  height: 3rem;
+  padding-top: 0.7rem;
+  padding-bottom: 0.7rem;
+  font-size: 0.94rem;
+}
+
+.area-editor-card .chip {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.64rem;
 }
 
 .autocomplete-shell {
@@ -549,9 +578,174 @@ h3 {
   margin: 0;
   min-height: 15rem;
   padding: 1.25rem 1.3rem;
-  white-space: pre-wrap;
+  white-space: normal;
   font-size: 0.86rem;
   line-height: 1.65;
+}
+
+.daily-report-shell {
+  display: grid;
+  gap: 1rem;
+}
+
+.daily-report-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 1rem;
+  font-size: 0.82rem;
+}
+
+.daily-report-votes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem 0.9rem;
+}
+
+.daily-report-vote {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 1rem;
+  background: var(--surface-soft);
+}
+
+.daily-report-vote span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.daily-report-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.daily-report-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.daily-report-tab:hover {
+  background: var(--surface-soft);
+  color: var(--ink);
+  transform: none;
+}
+
+.daily-report-tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.daily-report-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.daily-report-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.daily-report-column {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.daily-report-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.presession-job-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+}
+
+.presession-job-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.presession-job-tab:hover {
+  background: var(--surface-soft);
+  color: var(--ink);
+  transform: none;
+}
+
+.presession-job-tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.presession-job-tab strong {
+  font-size: 0.74rem;
+}
+
+.presession-job-card + .presession-job-card {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.presession-owner-list {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.95rem;
+}
+
+.presession-owner-row {
+  display: grid;
+  grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr);
+  gap: 0.1rem 0.85rem;
+  align-items: start;
+  font-size: 0.84rem;
+}
+
+.presession-owner-list--matrix {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem 1rem;
+}
+
+.presession-owner-row--compact {
+  grid-template-columns: minmax(0, 5rem) minmax(0, 1fr);
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 1rem;
+  background: var(--surface-soft);
+}
+
+.presession-owner-row strong {
+  color: var(--ink-strong);
+}
+
+.presession-owner-row span:last-child {
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .card-grid {
@@ -693,7 +887,12 @@ h3 {
     align-items: stretch;
   }
 
-  .area-editor-grid {
+  .area-editor-list,
+  .area-editor-grid,
+  .presession-owner-list--matrix,
+  .daily-report-meta,
+  .daily-report-votes,
+  .daily-report-columns {
     grid-template-columns: 1fr;
   }
 }

@@ -76,7 +76,7 @@
                 <button id="copy-report" class="secondary">Copiar resumen</button>
               </div>
               <div id="source-status" class="source-status"></div>
-              <pre id="daily-report" class="report-box"></pre>
+              <div id="daily-report" class="report-box"></div>
               <p class="meta-line">
                 La app puede trabajar con snapshot local o leer/escribir directo sobre Google Sheets si configuras service account.
               </p>
@@ -131,6 +131,9 @@
               <div class="section-heading">
                 <h2>Tu revision</h2>
               </div>
+              <p class="meta-line">
+                La pre-sesion solo considera open items con <strong>CCB Status = NEW</strong>.
+              </p>
               <div id="presession-owner-summary" class="source-status"></div>
               <div id="presession-pending-list" class="presession-list"></div>
               <div class="section-heading top-gap">
@@ -145,10 +148,10 @@
                 <button id="run-presession-job" class="secondary">Enviar pendientes</button>
               </div>
               <p class="meta-line">
-                Este job agrupa los open items sin respuesta por owner y les manda la solicitud de revision de pre-sesion.
+                Este job agrupa los open items <strong>NEW</strong> sin respuesta por owner y les manda la solicitud de revision de pre-sesion.
               </p>
               <div id="presession-job-summary" class="source-status"></div>
-              <pre id="presession-job-status" class="report-box"></pre>
+              <div id="presession-job-status" class="report-box"></div>
             </div>
           </section>
         </section>
