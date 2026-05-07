@@ -1,5 +1,8 @@
 node_modules
 .DS_Store
 data/state.json
+data/google-open-items-snapshot.json
+data/employee-directory.json
+data/google-user-oauth-token.json
 .env
 secrets/
