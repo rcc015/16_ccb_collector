@@ -708,6 +708,8 @@ function buildExistingPreSessionCheckMap(state) {
 function mapSnapshotToState(snapshot, existingState = null, areasOverride = null, votesOverride = null, preSessionOverride = null) {
   const areas = resolveAreas(areasOverride, existingState);
   const areaColumns = areas.filter((area) => area.sourceColumn);
+  const contactsDirectory = buildKnownContactsDirectory(areas);
+  const previousItems = new Map((existingState?.openItems || []).map((item) => [item.id, item]));
   const previousVotes = votesOverride instanceof Map
     ? votesOverride
     : new Map((existingState?.openItems || []).map((item) => [item.id, item.votes || []]));
@@ -723,6 +725,8 @@ function mapSnapshotToState(snapshot, existingState = null, areasOverride = null
         .filter((area) => String(row[area.sourceColumn] || "").trim().toUpperCase() === "TRUE")
         .map((area) => area.id);
 
+      const previousItem = previousItems.get(row.id) || null;
+      const resolvedOwnerContact = resolveContactByValue(row.owner, contactsDirectory);
       const fallbackOwnerArea = impactedAreaIds[0] || "";
       return {
         id: row.id,
@@ -731,6 +735,7 @@ function mapSnapshotToState(snapshot, existingState = null, areasOverride = null
         sourceRef: `${snapshot.spreadsheetTitle || "Google Sheet"} / ${snapshot.sheetName || "Open Item List"}`,
         ownerAreaId: fallbackOwnerArea,
         ownerName: row.owner || "",
+        ownerEmail: resolvedOwnerContact?.email || previousItem?.ownerEmail || "",
         ownerAreaHint: "",
         impactedAreaIds,
         isSubstantial: inferSubstantialChange(row),
@@ -1762,8 +1767,6 @@ function buildOpenItemsRowsFromState(state, areas) {
     baseRow["Minutes Related"] = baseRow["Minutes Related"] || "";
     baseRow["Git Repository"] = baseRow["Git Repository"] || "";
     baseRow["Jira Tickets Related"] = baseRow["Jira Tickets Related"] || "";
-    baseRow["CCB Score"] = item.ccbScore || "";
-    baseRow["CCB Status"] = item.externalStatus || (item.isSubstantial ? "REVIEW" : "No Localized");
 
     areaColumns.forEach((area) => {
       const preSessionCheck = getPreSessionCheck(item, area.id);
@@ -1869,12 +1872,6 @@ function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map()) {
 
     baseRecord.OI_ID = item.id || "";
     baseRecord["Open Item Description"] = item.title || "";
-    if (!baseRecord.Status && item.externalStatus) {
-      baseRecord.Status = item.externalStatus;
-    }
-    if (!baseRecord.Total && item.ccbScore) {
-      baseRecord.Total = item.ccbScore;
-    }
 
     return CCB_DECISION_HEADERS.map((header) => baseRecord[header] || "");
   });
@@ -2079,10 +2076,67 @@ function preserveDecisionFormulaCells(rows, existingDisplayValues, existingFormu
   });
 }
 
+function buildFormulaCopyRequests({
+  sheetId,
+  headerRow,
+  managedHeaders,
+  lastFormulaRow,
+  existingDataRowCount,
+  targetRowCount,
+  headerRowNumber,
+}) {
+  if (
+    sheetId == null ||
+    existingDataRowCount < 1 ||
+    targetRowCount <= existingDataRowCount ||
+    !Array.isArray(lastFormulaRow)
+  ) {
+    return [];
+  }
+
+  const sourceRowIndex = headerRowNumber + existingDataRowCount - 1;
+  const destinationStartRowIndex = sourceRowIndex + 1;
+  const destinationEndRowIndex = headerRowNumber + targetRowCount;
+
+  return headerRow
+    .map((header, columnIndex) => {
+      const formulaValue = lastFormulaRow[columnIndex];
+      if (
+        managedHeaders.has(header) ||
+        typeof formulaValue !== "string" ||
+        !formulaValue.trim().startsWith("=")
+      ) {
+        return null;
+      }
+
+      return {
+        copyPaste: {
+          source: {
+            sheetId,
+            startRowIndex: sourceRowIndex,
+            endRowIndex: sourceRowIndex + 1,
+            startColumnIndex: columnIndex,
+            endColumnIndex: columnIndex + 1,
+          },
+          destination: {
+            sheetId,
+            startRowIndex: destinationStartRowIndex,
+            endRowIndex: destinationEndRowIndex,
+            startColumnIndex: columnIndex,
+            endColumnIndex: columnIndex + 1,
+          },
+          pasteType: "PASTE_FORMULA",
+          pasteOrientation: "NORMAL",
+        },
+      };
+    })
+    .filter(Boolean);
+}
+
 async function fetchSpreadsheetMetadata() {
   const url =
     `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
-    "?fields=properties(title),sheets(properties(sheetId,title))";
+    "?fields=properties(title),sheets(properties(sheetId,title),tables(tableId,name,range))";
   return fetchGoogleSheetsJson(url);
 }
 
@@ -2345,7 +2399,86 @@ function getSheetMetadataByName(metadata, sheetName) {
     : null;
 }
 
-async function applyOpenItemOwnerPeopleChips(sheetId, headerRow, startRow, state) {
+function getPrimaryTableForSheet(sheetMetadata) {
+  const tables = Array.isArray(sheetMetadata?.tables) ? sheetMetadata.tables : [];
+  return tables[0] || null;
+}
+
+function buildTableResizeRequest(sheetMetadata, desiredEndRowIndex) {
+  const table = getPrimaryTableForSheet(sheetMetadata);
+  if (!table?.tableId || !table.range || desiredEndRowIndex == null) {
+    return null;
+  }
+
+  const currentEndRowIndex = Number(table.range.endRowIndex);
+  if (!Number.isFinite(currentEndRowIndex) || desiredEndRowIndex <= currentEndRowIndex) {
+    return null;
+  }
+
+  return {
+    updateTable: {
+      table: {
+        tableId: table.tableId,
+        name: table.name,
+        range: {
+          ...table.range,
+          endRowIndex: desiredEndRowIndex,
+        },
+      },
+      fields: "range",
+    },
+  };
+}
+
+async function fetchOpenItemOwnerEmailMap(sheetName, headerRow, startRow, rowCount) {
+  if (!sheetName || !Array.isArray(headerRow) || rowCount <= 0) {
+    return new Map();
+  }
+
+  const ownerColumnIndex = headerRow.findIndex((value) => String(value || "").trim() === "Owner");
+  const idColumnIndex = headerRow.findIndex((value) => String(value || "").trim() === "ID");
+  if (ownerColumnIndex < 0 || idColumnIndex < 0) {
+    return new Map();
+  }
+
+  const ownerColumnLabel = toA1Column(ownerColumnIndex);
+  const idColumnLabel = toA1Column(idColumnIndex);
+  const endRow = startRow + rowCount - 1;
+  const encodedSheetName = encodeURIComponent(sheetName);
+  const url =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}` +
+    `?ranges=${encodedSheetName}%21${ownerColumnLabel}${startRow}%3A${ownerColumnLabel}${endRow}` +
+    `&includeGridData=true` +
+    `&fields=sheets(data(rowData(values(chipRuns))))`;
+  const idValuesUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/${SOURCE_SPREADSHEET_ID}/values/` +
+    `${encodeURIComponent(`${sheetName}!${idColumnLabel}${startRow}:${idColumnLabel}${endRow}`)}`;
+
+  const [ownerPayload, idValuesPayload] = await Promise.all([
+    fetchGoogleSheetsJson(url),
+    fetchGoogleSheetsJson(idValuesUrl),
+  ]);
+
+  const idValues = Array.isArray(idValuesPayload?.values) ? idValuesPayload.values : [];
+  const rowData = ownerPayload?.sheets?.[0]?.data?.[0]?.rowData || [];
+  const ownerEmailById = new Map();
+
+  for (let index = 0; index < rowCount; index += 1) {
+    const itemId = String(idValues[index]?.[0] || "").trim();
+    if (!itemId) {
+      continue;
+    }
+    const chipRuns = rowData[index]?.values?.[0]?.chipRuns;
+    const chipEmail = normalizeEmail(chipRuns?.find((entry) => entry?.chip?.personProperties?.email)?.chip?.personProperties?.email);
+    if (chipEmail) {
+      ownerEmailById.set(itemId, chipEmail);
+    }
+  }
+
+  return ownerEmailById;
+}
+
+async function applyOpenItemOwnerPeopleChips(sheetId, headerRow, startRow, state, existingOwnerEmailById = new Map()) {
   if (sheetId == null) {
     return;
   }
@@ -2357,7 +2490,11 @@ async function applyOpenItemOwnerPeopleChips(sheetId, headerRow, startRow, state
 
   const contactsDirectory = buildKnownContactsDirectory(state.areas || []);
   const chipUpdates = state.openItems.map((item, index) => {
-    const contact = resolveContactByValue(item.ownerName, contactsDirectory);
+    const fallbackOwnerEmail = existingOwnerEmailById.get(item.id) || "";
+    const contact = resolveContactByValue(item.ownerEmail || fallbackOwnerEmail || item.ownerName, contactsDirectory) || {
+      name: String(item.ownerName || "").trim(),
+      email: normalizeEmail(item.ownerEmail || fallbackOwnerEmail),
+    };
     const cellValue = buildPeopleChipCellValue(contact, "@");
     if (!cellValue) {
       return null;
@@ -2422,12 +2559,28 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
   );
   const headerWidth = Math.max(context.headerRow.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
   const existingDataRowCount = Math.max(0, existingValues.length - context.headerRowNumber);
+  const existingOwnerEmailById = await fetchOpenItemOwnerEmailMap(
+    SOURCE_SHEET_NAME,
+    context.headerRow,
+    context.headerRowNumber + 1,
+    existingDataRowCount,
+  );
   const targetRowCount = Math.max(existingDataRowCount, rows.length, 1);
   const startRow = context.headerRowNumber + 1;
   const endRow = startRow + targetRowCount - 1;
   const endColumn = toA1Column(Math.max(0, headerWidth - 1));
   const clearRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${endRow}`;
   const nextRows = preserveOpenItemFormulaCells(rows, existingValues, existingFormulaValues, state.areas || []);
+  const formulaContext = getOpenItemSheetContext(existingFormulaValues);
+  const formulaCopyRequests = buildFormulaCopyRequests({
+    sheetId,
+    headerRow: context.headerRow,
+    managedHeaders: buildManagedOpenItemHeaders(state.areas || []),
+    lastFormulaRow: formulaContext.bodyRows[existingDataRowCount - 1] || [],
+    existingDataRowCount,
+    targetRowCount: rows.length,
+    headerRowNumber: context.headerRowNumber,
+  });
 
   await clearSheetRange(clearRange);
 
@@ -2436,8 +2589,12 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
     await writeSheetRange(writeRange, nextRows, "USER_ENTERED");
   }
 
+  await batchUpdateSpreadsheet(formulaCopyRequests);
+  const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + 1 + rows.length);
+  await batchUpdateSpreadsheet(tableResizeRequest ? [tableResizeRequest] : []);
+
   await applyOpenItemsCheckboxValidation(sheetId, context.headerRow, startRow, endRow, checkboxColumns);
-  await applyOpenItemOwnerPeopleChips(sheetId, context.headerRow, startRow, state);
+  await applyOpenItemOwnerPeopleChips(sheetId, context.headerRow, startRow, state, existingOwnerEmailById);
 }
 
 async function writeDecisionSheetPreservingTemplate(state) {
@@ -2471,6 +2628,16 @@ async function writeDecisionSheetPreservingTemplate(state) {
   const endRow = startRow + targetRowCount - 1;
   const endColumn = toA1Column(Math.max(0, headerWidth - 1));
   const clearRange = `${CCB_DECISION_SHEET_NAME}!A${startRow}:${endColumn}${endRow}`;
+  const formulaContext = getDecisionSheetContext(existingFormulaValues);
+  const formulaCopyRequests = buildFormulaCopyRequests({
+    sheetId,
+    headerRow: context.headerRow,
+    managedHeaders: buildManagedDecisionHeaders(),
+    lastFormulaRow: formulaContext.bodyRows[existingDataRowCount - 1] || [],
+    existingDataRowCount,
+    targetRowCount: decisionRows.length - 1,
+    headerRowNumber: context.headerRowNumber,
+  });
 
   await clearSheetRange(clearRange);
 
@@ -2478,6 +2645,10 @@ async function writeDecisionSheetPreservingTemplate(state) {
     const writeRange = `${CCB_DECISION_SHEET_NAME}!A${startRow}:${endColumn}${startRow + nextDecisionRows.length - 1}`;
     await writeSheetRange(writeRange, nextDecisionRows, "USER_ENTERED");
   }
+
+  await batchUpdateSpreadsheet(formulaCopyRequests);
+  const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + decisionRows.length);
+  await batchUpdateSpreadsheet(tableResizeRequest ? [tableResizeRequest] : []);
 }
 
 async function loadStateFromGoogleSheets() {
@@ -2672,6 +2843,7 @@ function sanitizeState(input) {
           sourceRef: item.sourceRef || "",
           ownerAreaId: item.ownerAreaId || "",
           ownerName: item.ownerName || "",
+          ownerEmail: normalizeEmail(item.ownerEmail),
           ownerAreaHint: item.ownerAreaHint || "",
           impactedAreaIds: Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : [],
           isSubstantial: Boolean(item.isSubstantial),

@@ -120,6 +120,8 @@ let preSessionDashboard = null;
 let autoSavePromise = null;
 let selectedPreSessionJobOpenItemId = "";
 let selectedDailyReportOpenItemId = "";
+let selectedOpenItemsStatusTab = "NEW";
+let selectedOpenItemId = "";
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
 
 function apiUrl(path) {
@@ -162,7 +164,7 @@ function collectKnownContacts() {
   };
 
   state.areas.forEach((area) => pushContact(area.owner, area.email));
-  state.openItems.forEach((item) => pushContact(item.ownerName, ""));
+  state.openItems.forEach((item) => pushContact(item.ownerName, item.ownerEmail || ""));
   importedContacts.forEach((contact) => pushContact(contact.name, contact.email));
   if (authConfig?.user) {
     pushContact(authConfig.user.name, authConfig.user.email);
@@ -195,9 +197,10 @@ function findContactByEmail(value) {
   return collectKnownContacts().find((contact) => (contact.email || "").trim().toLowerCase() === normalizedValue) || null;
 }
 
-function getMatchingContacts(query) {
+function getMatchingContacts(query, options = {}) {
   const normalizedQuery = String(query || "").trim().toLowerCase();
-  const contacts = collectKnownContacts();
+  const requireEmail = Boolean(options.requireEmail);
+  const contacts = collectKnownContacts().filter((contact) => !requireEmail || contact.email);
   if (!normalizedQuery) {
     return contacts.slice(0, 8);
   }
@@ -230,8 +233,8 @@ function setAreaOwnerSelection(areaId, contact) {
   }
 }
 
-function renderContactAutocomplete(dropdown, query, onSelect, emptyMessage = "") {
-  const matches = getMatchingContacts(query);
+function renderContactAutocomplete(dropdown, query, onSelect, emptyMessage = "", options = {}) {
+  const matches = getMatchingContacts(query, options);
   if (!matches.length) {
     dropdown.hidden = true;
     dropdown.innerHTML = emptyMessage ? `<div class="autocomplete-empty">${emptyMessage}</div>` : "";
@@ -288,6 +291,17 @@ function detectOpenItemIdPattern() {
     return { prefix: "OI", separator: "_", nextNumber: 1, width: 3 };
   }
 
+  const oiPatternEntries = parsedIds.filter((entry) => entry.prefix === "OI");
+  if (oiPatternEntries.length) {
+    const maxOiEntry = oiPatternEntries.sort((left, right) => right.number - left.number || right.width - left.width)[0];
+    return {
+      prefix: "OI",
+      separator: maxOiEntry.separator || "_",
+      nextNumber: maxOiEntry.number + 1,
+      width: Math.max(3, maxOiEntry.width),
+    };
+  }
+
   const summaryByPattern = new Map();
   parsedIds.forEach((entry) => {
     const key = `${entry.prefix}${entry.separator}`;
@@ -322,7 +336,7 @@ function getNextOpenItemId() {
 
 function updateNextOpenItemSuggestion(forceValue = false) {
   const nextId = getNextOpenItemId();
-  nextOpenItemHint.textContent = `Siguiente sugerido: ${nextId}`;
+  nextOpenItemHint.textContent = `Siguiente ID: ${nextId}`;
   openItemIdInput.placeholder = `ID, ej. ${nextId}`;
   if (forceValue || !String(openItemIdInput.value || "").trim()) {
     openItemIdInput.value = nextId;
@@ -582,6 +596,10 @@ function activateTab(tabId) {
   tabPanels.forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.tabPanel === tabId);
   });
+
+  if (tabId === "items") {
+    updateNextOpenItemSuggestion(true);
+  }
 }
 
 async function parseApiResponse(response, fallbackMessage) {
@@ -748,8 +766,28 @@ function renderOpenItems() {
     .filter((item) => item.status !== "closed")
     .slice()
     .sort((a, b) => Number(b.isSubstantial) - Number(a.isSubstantial) || a.id.localeCompare(b.id));
+  const groupedItems = {
+    NEW: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "NEW"),
+    APPROVED: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "APPROVED"),
+    REJECTED: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "REJECTED"),
+  };
 
-  activeItems.forEach((item) => {
+  const availableStatusTabs = Object.entries(groupedItems).filter(([, items]) => items.length > 0);
+  if (!availableStatusTabs.some(([status]) => status === selectedOpenItemsStatusTab)) {
+    selectedOpenItemsStatusTab = availableStatusTabs[0]?.[0] || "NEW";
+  }
+
+  const selectedStatusItems = groupedItems[selectedOpenItemsStatusTab] || [];
+  if (selectedStatusItems.length && !selectedStatusItems.some((item) => item.id === selectedOpenItemId)) {
+    selectedOpenItemId = selectedStatusItems[0].id;
+  }
+  if (!selectedStatusItems.length) {
+    selectedOpenItemId = "";
+  }
+
+  const selectedItem = selectedStatusItems.find((item) => item.id === selectedOpenItemId) || selectedStatusItems[0] || null;
+
+  const renderOpenItemCard = (item) => {
     const node = openItemTemplate.content.firstElementChild.cloneNode(true);
     node.querySelector(".item-id").textContent = item.id;
     node.querySelector(".item-title").textContent = item.title;
@@ -762,22 +800,27 @@ function renderOpenItems() {
     const ownerInput = node.querySelector("[data-open-item-owner-input]");
     const ownerDropdown = node.querySelector("[data-open-item-owner-autocomplete]");
     let lastCommittedOwner = item.ownerName || "";
+    let lastCommittedOwnerEmail = item.ownerEmail || "";
     const applyOpenItemOwnerSelection = async (selectedContact) => {
       const nextOwner = (selectedContact?.name || selectedContact?.email || "").trim();
-      if (!nextOwner || nextOwner === lastCommittedOwner) {
+      const nextOwnerEmail = (selectedContact?.email || "").trim().toLowerCase();
+      if (!nextOwner || (nextOwner === lastCommittedOwner && nextOwnerEmail === lastCommittedOwnerEmail)) {
         ownerInput.value = nextOwner || ownerInput.value;
         return;
       }
 
       item.ownerName = nextOwner;
+      item.ownerEmail = nextOwnerEmail;
       ownerInput.value = nextOwner;
       node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
 
       try {
         await saveStateSilently();
         lastCommittedOwner = item.ownerName || nextOwner;
+        lastCommittedOwnerEmail = item.ownerEmail || nextOwnerEmail;
       } catch (error) {
         item.ownerName = lastCommittedOwner;
+        item.ownerEmail = lastCommittedOwnerEmail;
         ownerInput.value = lastCommittedOwner;
         node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
         window.alert(error.message || "No se pudo guardar el open item owner.");
@@ -787,12 +830,14 @@ function renderOpenItems() {
     ownerInput.value = item.ownerName || "";
     ownerInput.addEventListener("input", (event) => {
       item.ownerName = event.currentTarget.value.trim();
+      item.ownerEmail = "";
       node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
       renderContactAutocomplete(
         ownerDropdown,
         item.ownerName,
         applyOpenItemOwnerSelection,
         "Sin coincidencias en el directorio de empleados.",
+        { requireEmail: true },
       );
     });
     ownerInput.addEventListener("focus", (event) => {
@@ -801,14 +846,16 @@ function renderOpenItems() {
         event.currentTarget.value,
         applyOpenItemOwnerSelection,
         "Sin coincidencias en el directorio de empleados.",
+        { requireEmail: true },
       );
     });
     ownerInput.addEventListener("blur", () => {
       const exactContact = findContactByName(ownerInput.value) || findContactByEmail(ownerInput.value);
-      if (exactContact) {
+      if (exactContact?.email) {
         applyOpenItemOwnerSelection(exactContact);
       } else {
         item.ownerName = lastCommittedOwner;
+        item.ownerEmail = lastCommittedOwnerEmail;
         ownerInput.value = lastCommittedOwner;
         node.querySelector(".meta-line").textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
       }
@@ -842,8 +889,63 @@ function renderOpenItems() {
       refreshDerivedViews();
     });
 
-    openItemsList.appendChild(node);
+    return node;
+  };
+
+  if (!availableStatusTabs.length) {
+    openItemsList.innerHTML = "<p class=\"meta-line\">No hay open items activos.</p>";
+    return;
+  }
+
+  openItemsList.innerHTML = `
+    <div class="open-items-shell">
+      <div class="open-items-status-tabs" role="tablist" aria-label="Estados de open items">
+        ${availableStatusTabs.map(([status, items]) => `
+          <button
+            type="button"
+            class="open-items-status-tab${selectedOpenItemsStatusTab === status ? " is-active" : ""}"
+            data-open-items-status-tab="${escapeHtml(status)}"
+          >
+            <span>${escapeHtml(status)}</span>
+            <strong>${items.length}</strong>
+          </button>
+        `).join("")}
+      </div>
+      <div class="open-items-ticket-tabs" role="tablist" aria-label="Open items">
+        ${selectedStatusItems.map((item) => `
+          <button
+            type="button"
+            class="open-items-ticket-tab${selectedItem?.id === item.id ? " is-active" : ""}"
+            data-open-item-ticket-tab="${escapeHtml(item.id)}"
+          >
+            <span>${escapeHtml(item.id)}</span>
+            <strong>${escapeHtml(item.title)}</strong>
+          </button>
+        `).join("")}
+      </div>
+      <div class="open-items-active-card"></div>
+    </div>
+  `;
+
+  openItemsList.querySelectorAll("[data-open-items-status-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedOpenItemsStatusTab = button.dataset.openItemsStatusTab || "NEW";
+      selectedOpenItemId = "";
+      renderOpenItems();
+    });
   });
+
+  openItemsList.querySelectorAll("[data-open-item-ticket-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedOpenItemId = button.dataset.openItemTicketTab || "";
+      renderOpenItems();
+    });
+  });
+
+  const cardHost = openItemsList.querySelector(".open-items-active-card");
+  if (cardHost && selectedItem) {
+    cardHost.appendChild(renderOpenItemCard(selectedItem));
+  }
 }
 
 function buildDailyReportText(prerequisite) {
@@ -1256,6 +1358,7 @@ async function applyImportedPayload(response) {
   renderAreas();
   renderOpenItems();
   renderSourceStatus();
+  updateNextOpenItemSuggestion(true);
   renderDailyReport(payload.prerequisite);
   await loadPreSessionDashboard();
 }
@@ -1275,13 +1378,14 @@ openItemForm.addEventListener("submit", async (event) => {
     sourceRef: String(formData.get("sourceRef")).trim(),
     ownerAreaId: String(formData.get("ownerAreaId")).trim(),
     ownerName: "",
+    ownerEmail: "",
     ownerAreaHint: "",
     impactedAreaIds,
     isSubstantial: formData.get("isSubstantial") === "on",
     status: String(formData.get("status")).trim(),
     createdAt: new Date().toISOString(),
     dueDate: "",
-    externalStatus: "NEW",
+    externalStatus: "",
     ccbScore: "",
     rawSheetRow: null,
     preSessionChecks: [],
