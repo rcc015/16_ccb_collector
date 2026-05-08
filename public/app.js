@@ -122,10 +122,35 @@ let selectedPreSessionJobOpenItemId = "";
 let selectedDailyReportOpenItemId = "";
 let selectedOpenItemsStatusTab = "NEW";
 let selectedOpenItemId = "";
+const deepLinkState = {
+  tab: "summary",
+  openItemId: "",
+  areaId: "",
+};
 const APP_BASE_PATH = document.documentElement.dataset.basePath || "";
 
 function apiUrl(path) {
   return `${APP_BASE_PATH}${path}`;
+}
+
+function normalizeTabId(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["summary", "items", "presession", "sources", "framework"].includes(normalized)) {
+    return normalized;
+  }
+  return "summary";
+}
+
+function applyDeepLinkFromUrl() {
+  const url = new URL(window.location.href);
+  deepLinkState.tab = normalizeTabId(url.searchParams.get("tab"));
+  deepLinkState.openItemId = String(url.searchParams.get("openItemId") || "").trim();
+  deepLinkState.areaId = String(url.searchParams.get("areaId") || "").trim();
+
+  if (deepLinkState.openItemId) {
+    selectedPreSessionJobOpenItemId = deepLinkState.openItemId;
+    selectedOpenItemId = deepLinkState.openItemId;
+  }
 }
 
 function slugify(value) {
@@ -447,8 +472,15 @@ function renderPreSessionDashboard() {
   const openItemQueue = Array.isArray(preSessionDashboard?.openItemQueue) ? preSessionDashboard.openItemQueue : [];
   const gmailDeliveryAvailable = Boolean(preSessionDashboard?.gmailDeliveryAvailable);
   const ownedAreas = ownerView.ownedAreas || [];
-  const pendingItems = ownerView.pendingItems || [];
-  const answeredItems = ownerView.answeredItems || [];
+  const targetOpenItemId = deepLinkState.tab === "presession" ? deepLinkState.openItemId : "";
+  const targetAreaId = deepLinkState.tab === "presession" ? deepLinkState.areaId : "";
+  const sortTargetFirst = (left, right) => {
+    const leftTarget = Number(left.openItemId === targetOpenItemId && (!targetAreaId || left.areaId === targetAreaId));
+    const rightTarget = Number(right.openItemId === targetOpenItemId && (!targetAreaId || right.areaId === targetAreaId));
+    return rightTarget - leftTarget;
+  };
+  const pendingItems = [...(ownerView.pendingItems || [])].sort(sortTargetFirst);
+  const answeredItems = [...(ownerView.answeredItems || [])].sort(sortTargetFirst);
 
   preSessionOwnerSummary.dataset.mode = ownedAreas.length ? "google-sheet-snapshot" : "local";
   preSessionOwnerSummary.innerHTML = ownedAreas.length
@@ -461,7 +493,7 @@ function renderPreSessionDashboard() {
 
   preSessionPendingList.innerHTML = pendingItems.length
     ? pendingItems.map((item) => `
-        <article class="presession-card">
+        <article class="presession-card${item.openItemId === targetOpenItemId && (!targetAreaId || item.areaId === targetAreaId) ? " is-targeted" : ""}">
           <div class="presession-card-top">
             <div>
               <p class="presession-eyebrow">${escapeHtml(item.areaName)}</p>
@@ -482,7 +514,7 @@ function renderPreSessionDashboard() {
 
   preSessionAnsweredList.innerHTML = answeredItems.length
     ? answeredItems.map((item) => `
-        <article class="presession-card">
+        <article class="presession-card${item.openItemId === targetOpenItemId && (!targetAreaId || item.areaId === targetAreaId) ? " is-targeted" : ""}">
           <div class="presession-card-top">
             <div>
               <p class="presession-eyebrow">${escapeHtml(item.areaName)}</p>
@@ -1549,8 +1581,11 @@ document.getElementById("run-presession-job").addEventListener("click", async ()
     preSessionJobStatus.textContent = payload.notifications.length
       ? payload.notifications.map((entry) => {
           const modeLabel = entry.sent ? "enviado" : entry.deliveryMode === "preview" ? "preview" : "pendiente";
+          const targetSuffix = entry.deliveryTarget && entry.deliveryTarget !== entry.ownerEmail
+            ? ` | destino prueba: ${entry.deliveryTarget}`
+            : "";
           const suffix = entry.error ? ` | error: ${entry.error}` : "";
-          return `- ${entry.ownerEmail}: ${entry.pendingCount} item(s) | ${modeLabel}${suffix}`;
+          return `- ${entry.ownerEmail}: ${entry.pendingCount} item(s) | ${modeLabel}${targetSuffix}${suffix}`;
         }).join("\n")
       : "No habia owners con solicitudes pendientes.";
   } catch (error) {
@@ -1630,10 +1665,11 @@ document.getElementById("logout-button").addEventListener("click", async () => {
 
 (async () => {
   try {
+    applyDeepLinkFromUrl();
     showGoogleSheetsOAuthResultFromQuery();
     const hasSession = await loadAuthConfig();
     renderReferencePanels();
-    activateTab("summary");
+    activateTab(deepLinkState.tab || "summary");
     if (hasSession) {
       await loadEmployeeDirectory();
       await loadGoogleSheetsUserAuthStatus();

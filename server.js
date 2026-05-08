@@ -23,6 +23,7 @@ const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "
 const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
 const GOOGLE_OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI || "";
+const PRESESSION_EMAIL_OVERRIDE = normalizeEmail(process.env.PRESESSION_EMAIL_OVERRIDE || "");
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const SEED_FILE = path.join(DATA_DIR, "seed.json");
 const AREA_DIRECTORY_FILE = path.join(DATA_DIR, "area-directory.json");
@@ -31,6 +32,7 @@ const GOOGLE_SNAPSHOT_FILE = path.join(DATA_DIR, "google-open-items-snapshot.jso
 const LIVE_SYNC_CONFIG_FILE = path.join(DATA_DIR, "live-sync-config.json");
 const AUTH_CONFIG_FILE = path.join(DATA_DIR, "auth-config.json");
 const USER_GOOGLE_OAUTH_TOKEN_FILE = path.join(DATA_DIR, "google-user-oauth-token.json");
+const USER_GOOGLE_OAUTH_TOKEN_RUNTIME_FILE = path.join(DATA_DIR, "google-user-oauth-token.runtime.json");
 const SESSION_COOKIE_NAME = "ccb_session";
 const OPEN_ITEM_HEADERS = [
   "ID",
@@ -444,11 +446,29 @@ function loadGoogleSheetsOAuthConfig() {
 }
 
 function loadUserGoogleOAuthToken() {
-  return readOptionalJson(USER_GOOGLE_OAUTH_TOKEN_FILE, null);
+  const tokenFiles = [USER_GOOGLE_OAUTH_TOKEN_FILE, USER_GOOGLE_OAUTH_TOKEN_RUNTIME_FILE];
+  for (const filePath of tokenFiles) {
+    if (fs.existsSync(filePath)) {
+      return readOptionalJson(filePath, null);
+    }
+  }
+  return null;
 }
 
 function persistUserGoogleOAuthToken(tokens) {
-  writeJson(USER_GOOGLE_OAUTH_TOKEN_FILE, tokens);
+  const tokenFiles = [USER_GOOGLE_OAUTH_TOKEN_FILE, USER_GOOGLE_OAUTH_TOKEN_RUNTIME_FILE];
+  let lastError = null;
+
+  for (const filePath of tokenFiles) {
+    try {
+      writeJson(filePath, tokens);
+      return filePath;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("No se pudo guardar el token OAuth de Google.");
 }
 
 function isUserGoogleOAuthConfigured() {
@@ -1134,20 +1154,162 @@ function buildPreSessionEmailSubject(group) {
   return `CCB pre-sesion: revision pendiente para ${group.pendingCount} open item${group.pendingCount === 1 ? "" : "s"}`;
 }
 
+function buildAppDeepLink(params = {}) {
+  const authConfig = loadAuthConfig();
+  const baseUrl = String(authConfig.appBaseUrl || withBasePath("/") || "").trim();
+
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch (error) {
+    url = new URL(baseUrl || "/", "http://localhost");
+  }
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value == null || value === "") {
+      return;
+    }
+    url.searchParams.set(key, String(value));
+  });
+
+  if (!/^https?:/i.test(baseUrl)) {
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  return url.toString();
+}
+
 function buildPreSessionEmailBody(group) {
-  const appUrl = loadAuthConfig().appBaseUrl || withBasePath("/");
+  const appUrl = buildAppDeepLink({ tab: "presession" });
   const lines = [
     `Hola ${group.ownerName || group.ownerEmail},`,
     "",
     "Necesitamos tu revision de pre-sesion para los siguientes open items donde tu area aparece impactada.",
     "Por favor entra a la app y marca si impacta o no impacta para tu area.",
     "",
-    ...group.pendingItems.map((item) => `- ${item.openItemId} | ${item.title} | Area: ${item.areaName}${item.externalStatus ? ` | Estado: ${item.externalStatus}` : ""}`),
+    ...group.pendingItems.flatMap((item) => {
+      const reviewUrl = buildAppDeepLink({
+        tab: "presession",
+        openItemId: item.openItemId,
+        areaId: item.areaId,
+      });
+      return [
+        `- ${item.openItemId} | ${item.title} | Area: ${item.areaName}${item.externalStatus ? ` | Estado: ${item.externalStatus}` : ""}`,
+        `  Revision directa: ${reviewUrl}`,
+      ];
+    }),
     "",
-    `App: ${appUrl}`,
+    `Vista general: ${appUrl}`,
   ];
 
   return lines.join("\n");
+}
+
+function escapeHtmlEmail(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildPreSessionEmailHtml(group) {
+  const ownerName = group.ownerName || group.ownerEmail || "Owner";
+  const dashboardUrl = buildAppDeepLink({ tab: "presession" });
+  const introCount = `${group.pendingCount} open item${group.pendingCount === 1 ? "" : "s"}`;
+  const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
+
+  const itemCards = group.pendingItems.map((item) => {
+    const reviewUrl = buildAppDeepLink({
+      tab: "presession",
+      openItemId: item.openItemId,
+      areaId: item.areaId,
+    });
+    return `
+      <tr>
+        <td style="padding:0 0 16px 0;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;">
+            <tr>
+              <td style="padding:20px 22px;">
+                <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748B;margin-bottom:8px;">
+                  ${escapeHtmlEmail(item.openItemId)} · ${escapeHtmlEmail(item.areaName)}
+                </div>
+                <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:800;letter-spacing:-0.03em;margin-bottom:10px;">
+                  ${escapeHtmlEmail(item.title)}
+                </div>
+                <div style="font-family:${sansStack};font-size:15px;line-height:1.6;color:#334155;margin-bottom:14px;">
+                  Tu area necesita confirmar si este open item te impacta o no.
+                  ${item.externalStatus ? `Estado CCB actual: <strong>${escapeHtmlEmail(item.externalStatus)}</strong>.` : ""}
+                </div>
+                <div style="margin-bottom:14px;">
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#EFF6FF;color:#0369A1;font-family:${sansStack};font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">
+                    Area: ${escapeHtmlEmail(item.areaName)}
+                  </span>
+                </div>
+                <a href="${escapeHtmlEmail(reviewUrl)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;">
+                  Revisar open item
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  return `
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#FDFCF9;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;margin:0 auto;border:1px solid #E2E8F0;border-radius:24px;background:#FFFFFF;overflow:hidden;">
+      <tr>
+        <td style="padding:26px 30px;border-bottom:1px solid #E2E8F0;">
+          <div style="font-family:${sansStack};font-size:28px;line-height:1;color:#111827;font-weight:800;letter-spacing:-0.04em;">
+            conceiv<span style="color:#C88A2D;">able</span>
+            <span style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#475569;font-weight:600;vertical-align:middle;">Life Sciences</span>
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:30px;">
+          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;">
+            Hello ${escapeHtmlEmail(ownerName)},
+          </div>
+          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;margin-top:8px;">
+            It is now your turn to review <strong>${escapeHtmlEmail(introCount)}</strong> in CCB pre-session and confirm whether they impact your area.
+          </div>
+          <div style="font-family:${sansStack};font-size:15px;line-height:1.7;color:#475569;margin-top:8px;margin-bottom:24px;">
+            Open each item below and mark <strong>Si impacta</strong> or <strong>No impacta</strong>.
+          </div>
+
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:18px;">
+            <tr>
+              <td style="padding:18px 22px;border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;">
+                <div style="font-family:${sansStack};font-size:14px;color:#64748B;margin-bottom:8px;">Pending areas</div>
+                <div style="font-family:${sansStack};font-size:22px;color:#0F172A;font-weight:800;letter-spacing:-0.03em;">${escapeHtmlEmail(group.areaNames.join(", "))}</div>
+              </td>
+            </tr>
+          </table>
+
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+            ${itemCards}
+          </table>
+
+          <div style="padding-top:8px;">
+            <a href="${escapeHtmlEmail(dashboardUrl)}" style="display:inline-block;background:#FFFFFF;color:#0F2836;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;border:1px solid #CBD5E1;">
+              Abrir vista general
+            </a>
+          </div>
+
+          <div style="font-family:${sansStack};font-size:14px;line-height:1.7;color:#64748B;margin-top:22px;">
+            When you open the link, CCB Collector will take you directly to the pre-session review tab and, when possible, focus the specific ticket for your area.
+          </div>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
 }
 
 function toBase64Url(value) {
@@ -1158,20 +1320,33 @@ function toBase64Url(value) {
     .replace(/=+$/g, "");
 }
 
-async function sendGmailMessage({ to, subject, text }) {
+async function sendGmailMessage({ to, subject, text, html = "" }) {
   if (getGoogleSheetsStorageMode() !== "user-oauth") {
     throw new Error("El envio de correo requiere Google OAuth de usuario conectado.");
   }
 
+  const boundary = `ccb_collector_${Date.now().toString(36)}`;
   const url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
   const headers = await getGoogleRequestHeaders(url);
   const rawMessage = [
-    "Content-Type: text/plain; charset=UTF-8",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
     "MIME-Version: 1.0",
     `To: ${to}`,
     `Subject: ${subject}`,
     "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 7bit",
+    "",
     text,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    html || `<pre>${escapeHtmlEmail(text)}</pre>`,
+    "",
+    `--${boundary}--`,
   ].join("\r\n");
 
   const response = await fetch(url, {
@@ -1216,6 +1391,8 @@ async function runPreSessionRequestJob(user) {
   for (const group of queue) {
     const subject = buildPreSessionEmailSubject(group);
     const body = buildPreSessionEmailBody(group);
+    const htmlBody = buildPreSessionEmailHtml(group);
+    const deliveryTarget = PRESESSION_EMAIL_OVERRIDE || group.ownerEmail;
     let deliveryMode = "preview";
     let sent = false;
     let errorMessage = "";
@@ -1223,9 +1400,10 @@ async function runPreSessionRequestJob(user) {
     try {
       if (getGoogleSheetsStorageMode() === "user-oauth" && isUserGoogleOAuthConnected()) {
         await sendGmailMessage({
-          to: group.ownerEmail,
+          to: deliveryTarget,
           subject,
           text: body,
+          html: htmlBody,
         });
         deliveryMode = "gmail";
         sent = true;
@@ -1251,6 +1429,7 @@ async function runPreSessionRequestJob(user) {
 
     results.push({
       ownerEmail: group.ownerEmail,
+      deliveryTarget,
       ownerName: group.ownerName,
       pendingCount: group.pendingCount,
       deliveryMode,
@@ -2336,7 +2515,15 @@ async function applyPeopleChipUpdates(sheetId, chipUpdates) {
       },
     }));
 
-  await batchUpdateSpreadsheet(requests);
+  if (!requests.length) {
+    return;
+  }
+
+  const maxPeopleChipRequestsPerBatch = 10;
+  for (let index = 0; index < requests.length; index += maxPeopleChipRequestsPerBatch) {
+    const nextBatch = requests.slice(index, index + maxPeopleChipRequestsPerBatch);
+    await batchUpdateSpreadsheet(nextBatch);
+  }
 }
 
 async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, endRow, checkboxColumns = []) {
@@ -3027,6 +3214,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && pathname === "/api/google-sheets-auth/disconnect") {
       deleteIfExists(USER_GOOGLE_OAUTH_TOKEN_FILE);
+      deleteIfExists(USER_GOOGLE_OAUTH_TOKEN_RUNTIME_FILE);
       sendJson(response, 200, {
         ok: true,
         googleSheetsAuth: getGoogleSheetsAuthStatus(),
