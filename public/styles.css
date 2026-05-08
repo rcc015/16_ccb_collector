@@ -753,6 +753,45 @@ h3 {
   gap: 0.85rem;
 }
 
+.evaluation-score-summary {
+  display: grid;
+  gap: 0.75rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.evaluation-score-summary h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.evaluation-score-meta {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.evaluation-score-meta span,
+.evaluation-criterion-averages span {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+.evaluation-score-meta strong {
+  font-size: 0.98rem;
+  color: var(--ink);
+}
+
+.evaluation-criterion-averages ul {
+  margin: 0;
+  padding-left: 1rem;
+  color: var(--ink-strong);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
 .evaluation-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -788,6 +827,10 @@ h3 {
   padding: 1rem;
 }
 
+.open-item-card--impacting {
+  border-left: 4px solid rgba(15, 40, 54, 0.72);
+}
+
 .evaluation-panel-shell {
   display: grid;
   gap: 1rem;
@@ -807,9 +850,27 @@ h3 {
 .evaluation-warning {
   padding: 0.75rem 0.85rem;
   border-radius: 0.9rem;
-  background: var(--warn-bg);
-  color: var(--warn-text);
-  font-size: 0.82rem;
+  background: rgba(254, 242, 242, 0.55);
+  border: 1px solid rgba(153, 27, 27, 0.18);
+  color: #8f3b3b;
+  font-size: 0.78rem;
+}
+
+.evaluation-inline-warning {
+  margin-top: 0.45rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.8rem;
+  background: rgba(254, 242, 242, 0.48);
+  border: 1px solid rgba(153, 27, 27, 0.14);
+  color: #8f3b3b;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.evaluation-helper-text {
+  margin: 0.4rem 0 0;
+  font-size: 0.76rem;
+  color: var(--muted);
 }
 
 .evaluation-criteria-list {
@@ -911,6 +972,7 @@ h3 {
   gap: 1rem;
 }
 
+.open-items-impact-tabs,
 .open-items-status-tabs,
 .open-items-ticket-tabs {
   display: flex;
@@ -918,6 +980,7 @@ h3 {
   gap: 0.65rem;
 }
 
+.open-items-impact-tab,
 .open-items-status-tab,
 .open-items-ticket-tab {
   display: inline-flex;
@@ -945,6 +1008,7 @@ h3 {
   font-weight: 600;
 }
 
+.open-items-impact-tab:hover,
 .open-items-status-tab:hover,
 .open-items-ticket-tab:hover {
   background: var(--surface-soft);
@@ -952,6 +1016,7 @@ h3 {
   transform: none;
 }
 
+.open-items-impact-tab.is-active,
 .open-items-status-tab.is-active,
 .open-items-ticket-tab.is-active {
   background: var(--accent);
@@ -1098,6 +1163,7 @@ h3 {
   .daily-report-meta,
   .daily-report-votes,
   .daily-report-columns,
+  .evaluation-score-meta,
   .evaluation-summary-grid,
   .evaluation-overview,
   .evaluation-criterion-columns {

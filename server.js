@@ -54,6 +54,12 @@ const OPEN_ITEM_HEADERS = [
   "Research",
   "Exploration",
   "Mecha",
+  "impactedUsers",
+  "impactedAreas",
+  "evaluationParticipants",
+  "voteParticipants",
+  "pendingEvaluators",
+  "lastEvaluationDate",
   "Minutes Related",
   "Git Repository",
   "CCB Score",
@@ -61,7 +67,7 @@ const OPEN_ITEM_HEADERS = [
   "Jira Tickets Related",
 ];
 const AREA_HEADERS = ["id", "name", "owner", "email", "sourceColumn"];
-const VOTE_HEADERS = ["openItemId", "areaId", "decision", "comment", "createdAt"];
+const VOTE_HEADERS = ["openItemId", "areaId", "decision", "comment", "voterEmail", "voterName", "voterArea", "createdAt"];
 const PRESESSION_HEADERS = [
   "openItemId",
   "areaId",
@@ -102,6 +108,28 @@ const CCB_DECISION_HEADERS = [
   "Total",
   "Status",
 ];
+const CCB_DECISION_AGGREGATE_HEADERS = [
+  "CCB Decision Average Score",
+  "CCB Decision Recommendation",
+  "CCB Decision Evaluator Count",
+  "CCB Decision Strategic Alignment Avg",
+  "CCB Decision Risk Assessment Avg",
+  "CCB Decision Resource Impact Avg",
+  "CCB Decision Customer Value Avg",
+  "CCB Decision Operational Feasibility Avg",
+  "CCB Decision Last Updated",
+  "CCB Decision Evaluators",
+];
+
+function stripOpenItemDecisionHeaders(headers = []) {
+  return (Array.isArray(headers) ? headers : [])
+    .map((header) => String(header || "").trim())
+    .filter((header) => (
+      header &&
+      !CCB_DECISION_AGGREGATE_HEADERS.includes(header) &&
+      !/^Column\s+\d+$/i.test(header)
+    ));
+}
 const DEFAULT_CCB_DECISION_CRITERIA = [
   {
     id: "strategic-alignment",
@@ -559,6 +587,141 @@ function getDecisionRecommendation(weightedScore) {
   return "REJECT";
 }
 
+function calculateEvaluatorWeightedScore(evaluatorEvaluation = [], criteria = getDefaultCcbDecisionCriteria()) {
+  return calculateWeightedScore(evaluatorEvaluation, criteria);
+}
+
+function getSubmittedEvaluationsForOpenItem(openItemId, state, criteria = null) {
+  const effectiveCriteria = Array.isArray(criteria) && criteria.length ? criteria : (
+    Array.isArray(state?.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+      ? state.ccbDecisionCriteria
+      : getDefaultCcbDecisionCriteria()
+  );
+  const grouped = new Map();
+
+  (state?.ccbEvaluations || [])
+    .filter((entry) => entry.openItemId === openItemId)
+    .forEach((entry) => {
+      const key = normalizeEmail(entry.evaluatorEmail);
+      if (!key) {
+        return;
+      }
+      if (!grouped.has(key)) {
+        grouped.set(key, []);
+      }
+      grouped.get(key).push(entry);
+    });
+
+  return Array.from(grouped.entries())
+    .map(([evaluatorEmail, entries]) => ({
+      evaluatorEmail,
+      evaluatorName: entries[0]?.evaluatorName || "",
+      evaluatorArea: entries[0]?.evaluatorArea || "",
+      entries,
+      weightedScore: calculateEvaluatorWeightedScore(entries, effectiveCriteria),
+      updatedAt: entries
+        .map((entry) => entry.updatedAt || entry.createdAt || "")
+        .filter(Boolean)
+        .sort()
+        .reverse()[0] || "",
+    }))
+    .filter((group) => Number.isFinite(group.weightedScore));
+}
+
+function calculateOpenItemCcbDecisionAverages(openItemId, state, criteria = null) {
+  const effectiveCriteria = Array.isArray(criteria) && criteria.length ? criteria : (
+    Array.isArray(state?.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+      ? state.ccbDecisionCriteria
+      : getDefaultCcbDecisionCriteria()
+  );
+  const submittedEvaluations = getSubmittedEvaluationsForOpenItem(openItemId, state, effectiveCriteria);
+  if (!submittedEvaluations.length) {
+    return {
+      averageWeightedScore: null,
+      recommendation: "INCOMPLETE",
+      evaluatorCount: 0,
+      criterionAverages: Object.fromEntries(effectiveCriteria.map((criterion) => [criterion.id, null])),
+      lastUpdated: "",
+      evaluators: [],
+    };
+  }
+
+  const averageWeightedScore = Number((
+    submittedEvaluations.reduce((sum, entry) => sum + Number(entry.weightedScore || 0), 0) / submittedEvaluations.length
+  ).toFixed(2));
+
+  const criterionAverages = Object.fromEntries(effectiveCriteria.map((criterion) => {
+    const scores = submittedEvaluations
+      .map((entry) => Number(entry.entries.find((candidate) => candidate.criterionId === criterion.id)?.score || 0))
+      .filter((score) => Number.isInteger(score) && score >= 1 && score <= 5);
+    const average = scores.length
+      ? Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(2))
+      : null;
+    return [criterion.id, average];
+  }));
+
+  const lastUpdated = submittedEvaluations
+    .map((entry) => entry.updatedAt)
+    .filter(Boolean)
+    .sort()
+    .reverse()[0] || "";
+
+  return {
+    averageWeightedScore,
+    recommendation: getDecisionRecommendation(averageWeightedScore),
+    evaluatorCount: submittedEvaluations.length,
+    criterionAverages,
+    lastUpdated,
+    evaluators: submittedEvaluations.map((entry) => entry.evaluatorName || entry.evaluatorEmail),
+  };
+}
+
+function updateOpenItemCcbDecision(openItemId, aggregatedDecision, state) {
+  const item = (state?.openItems || []).find((candidate) => candidate.id === openItemId);
+  if (!item) {
+    return null;
+  }
+
+  const summary = aggregatedDecision || calculateOpenItemCcbDecisionAverages(
+    openItemId,
+    state,
+    Array.isArray(state?.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+      ? state.ccbDecisionCriteria
+      : getDefaultCcbDecisionCriteria(),
+  );
+
+  item.ccbDecisionAverageScore = summary.averageWeightedScore;
+  item.ccbDecisionRecommendation = summary.recommendation;
+  item.ccbDecisionEvaluatorCount = summary.evaluatorCount;
+  item.ccbDecisionCriterionAverages = summary.criterionAverages;
+  item.ccbDecisionLastUpdated = summary.lastUpdated;
+  item.ccbDecisionEvaluators = summary.evaluators;
+  return item;
+}
+
+function getOpenItemCcbDecisionSummary(openItemId, state) {
+  const item = (state?.openItems || []).find((candidate) => candidate.id === openItemId);
+  if (!item) {
+    return null;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(item, "ccbDecisionAverageScore") &&
+    Object.prototype.hasOwnProperty.call(item, "ccbDecisionRecommendation")
+  ) {
+    return {
+      averageWeightedScore: item.ccbDecisionAverageScore ?? null,
+      recommendation: item.ccbDecisionRecommendation || "INCOMPLETE",
+      evaluatorCount: Number(item.ccbDecisionEvaluatorCount || 0),
+      criterionAverages: item.ccbDecisionCriterionAverages || {},
+      lastUpdated: item.ccbDecisionLastUpdated || "",
+      evaluators: Array.isArray(item.ccbDecisionEvaluators) ? item.ccbDecisionEvaluators : [],
+    };
+  }
+
+  return calculateOpenItemCcbDecisionAverages(openItemId, state);
+}
+
 function isFastTrackCandidate(item, evaluationEntries = []) {
   const byCriterion = new Map((evaluationEntries || []).map((entry) => [entry.criterionId, entry]));
   const riskScore = Number(byCriterion.get("risk-assessment")?.score || 0);
@@ -581,10 +744,10 @@ function getEvaluationWarnings(item, evaluationEntries = [], criteria = getDefau
     const entry = byCriterion.get(criterion.id);
     const score = Number(entry?.score);
     if (!Number.isInteger(score) || score < 1 || score > 5) {
-      warnings.push(`${criterion.name}: score is required.`);
+      warnings.push(`Please select a score for ${criterion.name}.`);
     }
     if (!String(entry?.rationale || "").trim()) {
-      warnings.push(`${criterion.name}: rationale is required.`);
+      warnings.push(`Please provide a decision justification for ${criterion.name}.`);
     }
   });
 
@@ -991,8 +1154,42 @@ function mapSnapshotToState(snapshot, existingState = null, areasOverride = null
         rawSheetRow: row,
         votes: previousVotes.get(row.id) || [],
         preSessionChecks: previousPreSessionChecks.get(row.id) || [],
+        impactedUsers: String(row.impactedUsers || "").trim() ? String(row.impactedUsers || "").split(/\s*,\s*/).filter(Boolean) : [],
+        impactedAreas: String(row.impactedAreas || "").trim() ? String(row.impactedAreas || "").split(/\s*,\s*/).filter(Boolean) : [],
+        evaluationParticipants: String(row.evaluationParticipants || "").trim() ? String(row.evaluationParticipants || "").split(/\s*,\s*/).filter(Boolean) : [],
+        voteParticipants: String(row.voteParticipants || "").trim() ? String(row.voteParticipants || "").split(/\s*,\s*/).filter(Boolean) : [],
+        pendingEvaluators: String(row.pendingEvaluators || "").trim() ? String(row.pendingEvaluators || "").split(/\s*,\s*/).filter(Boolean) : [],
+        lastEvaluationDate: row.lastEvaluationDate || "",
+        ccbDecisionCriterionAverages: {
+          "strategic-alignment": null,
+          "risk-assessment": null,
+          "resource-impact": null,
+          "customer-value": null,
+          "operational-feasibility": null,
+        },
+        ccbDecisionAverageScore: null,
+        ccbDecisionRecommendation: "",
+        ccbDecisionEvaluatorCount: 0,
+        ccbDecisionLastUpdated: "",
+        ccbDecisionEvaluators: [],
       };
     });
+
+  openItems.forEach((item) => {
+    const derived = deriveOpenItemTracking({
+      ...existingState,
+      areas,
+      openItems,
+      ccbEvaluations: Array.isArray(existingState?.ccbEvaluations) ? existingState.ccbEvaluations : [],
+    }, item);
+    item.impactedAreaIds = derived.impactedAreaIds;
+    item.impactedAreas = derived.impactedAreas;
+    item.impactedUsers = derived.impactedUsers;
+    item.evaluationParticipants = derived.evaluationParticipants;
+    item.voteParticipants = derived.voteParticipants;
+    item.pendingEvaluators = derived.pendingEvaluators;
+    item.lastEvaluationDate = derived.lastEvaluationDate;
+  });
 
   return {
     areas,
@@ -1053,6 +1250,61 @@ function derivePrerequisiteStatus(state) {
 
 function buildAreaMap(state) {
   return new Map(state.areas.map((area) => [area.id, area]));
+}
+
+function uniqueStrings(values = []) {
+  return Array.from(new Set(
+    values
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  ));
+}
+
+function deriveOpenItemTracking(state, item) {
+  const areaMap = buildAreaMap(state);
+  const impactedAreaIds = uniqueStrings([
+    ...(Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : []),
+    ...((item.votes || []).map((vote) => vote.areaId)),
+    ...((item.preSessionChecks || [])
+      .filter((check) => check.decision === "impact")
+      .map((check) => check.areaId)),
+    ...((state.ccbEvaluations || [])
+      .filter((evaluation) => evaluation.openItemId === item.id)
+      .map((evaluation) => evaluation.evaluatorArea)),
+  ]);
+
+  const autoAssignedUsers = impactedAreaIds
+    .map((areaId) => normalizeEmail(areaMap.get(areaId)?.email))
+    .filter(Boolean);
+  const voteParticipants = uniqueStrings((item.votes || []).map((vote) => normalizeEmail(vote.voterEmail)));
+  const evaluationParticipants = uniqueStrings(
+    (state.ccbEvaluations || [])
+      .filter((evaluation) => evaluation.openItemId === item.id)
+      .map((evaluation) => normalizeEmail(evaluation.evaluatorEmail)),
+  );
+  const impactedUsers = uniqueStrings([
+    ...autoAssignedUsers,
+    ...voteParticipants,
+    ...evaluationParticipants,
+  ]);
+  const respondedUsers = new Set([...voteParticipants, ...evaluationParticipants]);
+  const pendingEvaluators = impactedUsers.filter((email) => !respondedUsers.has(email));
+  const evaluationDates = (state.ccbEvaluations || [])
+    .filter((evaluation) => evaluation.openItemId === item.id)
+    .map((evaluation) => evaluation.updatedAt || evaluation.createdAt)
+    .filter(Boolean)
+    .sort()
+    .reverse();
+
+  return {
+    impactedAreaIds,
+    impactedAreas: uniqueStrings(impactedAreaIds.map((areaId) => areaMap.get(areaId)?.name || areaId)),
+    impactedUsers,
+    evaluationParticipants,
+    voteParticipants,
+    pendingEvaluators,
+    lastEvaluationDate: evaluationDates[0] || "",
+  };
 }
 
 function buildOpenReport(state) {
@@ -1696,6 +1948,11 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluationInput) {
   if (!evaluatorEmail) {
     throw new Error("No encontramos el correo del evaluador.");
   }
+  const resolvedEvaluatorArea = String(
+    evaluator?.area ||
+    state.areas.find((area) => normalizeEmail(area.email) === evaluatorEmail)?.id ||
+    ""
+  ).trim();
 
   const criteria = Array.isArray(state.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
     ? state.ccbDecisionCriteria
@@ -1708,7 +1965,7 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluationInput) {
       openItemId,
       evaluatorEmail,
       evaluatorName: String(evaluator?.name || "").trim(),
-      evaluatorArea: String(evaluator?.area || "").trim(),
+      evaluatorArea: resolvedEvaluatorArea,
       criterionId: criterion.id,
       criterionName: criterion.name,
       score: Number.parseInt(String(submitted.score || "").trim(), 10) || 0,
@@ -1722,8 +1979,8 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluationInput) {
 
   const warnings = getEvaluationWarnings(item, nextEntries, criteria).filter((message) => !message.includes("Fast-track candidate."));
   const blockingWarnings = warnings.filter((message) => (
-    message.includes("score is required") ||
-    message.includes("rationale is required")
+    message.includes("Please select a score") ||
+    message.includes("Please provide a decision justification")
   ));
   if (blockingWarnings.length) {
     throw new Error(blockingWarnings[0]);
@@ -1743,12 +2000,23 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluationInput) {
   }));
 
   state.ccbEvaluations = [...preserved, ...normalizedEntries];
+  const aggregatedDecision = calculateOpenItemCcbDecisionAverages(openItemId, state, criteria);
+  const tracking = deriveOpenItemTracking(state, item);
+  item.impactedAreaIds = tracking.impactedAreaIds;
+  item.impactedAreas = tracking.impactedAreas;
+  item.impactedUsers = tracking.impactedUsers;
+  item.evaluationParticipants = tracking.evaluationParticipants;
+  item.voteParticipants = tracking.voteParticipants;
+  item.pendingEvaluators = tracking.pendingEvaluators;
+  item.lastEvaluationDate = tracking.lastEvaluationDate;
+  updateOpenItemCcbDecision(openItemId, aggregatedDecision, state);
   const nextState = await persistStateStore(state);
   return {
     state: nextState,
     evaluation: normalizedEntries,
     weightedScore: calculateWeightedScore(normalizedEntries, criteria),
     recommendation: getDecisionRecommendation(calculateWeightedScore(normalizedEntries, criteria)),
+    aggregatedDecision,
     warnings: getEvaluationWarnings(item, normalizedEntries, criteria),
   };
 }
@@ -2120,18 +2388,17 @@ function formatMexicoCityDateTime(value) {
 }
 
 function buildOpenItemHeaders(state, areas) {
-  const headerSet = new Set(
+  const existingHeaders = stripOpenItemDecisionHeaders(
     Array.isArray(state.source?.sheetHeaders) && state.source.sheetHeaders.length
       ? state.source.sheetHeaders
-      : OPEN_ITEM_HEADERS,
+      : [],
   );
 
-  OPEN_ITEM_HEADERS.forEach((header) => headerSet.add(header));
-  areas
-    .filter((area) => area.sourceColumn)
-    .forEach((area) => headerSet.add(area.sourceColumn));
+  if (existingHeaders.length) {
+    return existingHeaders;
+  }
 
-  return Array.from(headerSet);
+  return stripOpenItemDecisionHeaders(OPEN_ITEM_HEADERS);
 }
 
 function buildManagedOpenItemHeaders(areas) {
@@ -2143,6 +2410,12 @@ function buildManagedOpenItemHeaders(areas) {
     "Due Date",
     "Status",
     "Comments/Updates",
+    "impactedUsers",
+    "impactedAreas",
+    "evaluationParticipants",
+    "voteParticipants",
+    "pendingEvaluators",
+    "lastEvaluationDate",
   ]);
 
   areas
@@ -2156,6 +2429,7 @@ function buildManagedDecisionHeaders() {
   return new Set([
     "OI_ID",
     "Open Item Description",
+    ...CCB_DECISION_AGGREGATE_HEADERS,
   ]);
 }
 
@@ -2191,6 +2465,9 @@ function parseVotesSheetRows(values) {
       areaId,
       decision: String(record.decision || "").trim() || "needs-info",
       comment: String(record.comment || "").trim(),
+      voterEmail: normalizeEmail(record.voterEmail),
+      voterName: String(record.voterName || "").trim(),
+      voterArea: String(record.voterArea || "").trim(),
       createdAt: String(record.createdAt || "").trim() || new Date().toISOString(),
     });
   });
@@ -2236,8 +2513,13 @@ function buildOpenItemsRowsFromState(state, areas) {
     const baseRow = item.rawSheetRow && typeof item.rawSheetRow === "object"
       ? { ...item.rawSheetRow }
       : {};
-    const impactedAreaIds = new Set(Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : []);
+    const tracking = deriveOpenItemTracking(state, item);
+    const impactedAreaIds = new Set(tracking.impactedAreaIds);
     const preservedOwner = String(baseRow.Owner || baseRow.owner || "").trim();
+
+    CCB_DECISION_AGGREGATE_HEADERS.forEach((header) => {
+      delete baseRow[header];
+    });
 
     baseRow.ID = item.id || "";
     baseRow["Open Item Description"] = item.title || "";
@@ -2246,6 +2528,12 @@ function buildOpenItemsRowsFromState(state, areas) {
     baseRow["Due Date"] = formatMexicoCityDateTime(item.dueDate || baseRow["Due Date"] || "");
     baseRow.Status = item.status || "open";
     baseRow["Comments/Updates"] = item.description || "";
+    baseRow.impactedUsers = tracking.impactedUsers.join(", ");
+    baseRow.impactedAreas = tracking.impactedAreas.join(", ");
+    baseRow.evaluationParticipants = tracking.evaluationParticipants.join(", ");
+    baseRow.voteParticipants = tracking.voteParticipants.join(", ");
+    baseRow.pendingEvaluators = tracking.pendingEvaluators.join(", ");
+    baseRow.lastEvaluationDate = tracking.lastEvaluationDate ? formatMexicoCityDateTime(tracking.lastEvaluationDate) : "";
     baseRow["Minutes Related"] = baseRow["Minutes Related"] || "";
     baseRow["Git Repository"] = baseRow["Git Repository"] || "";
     baseRow["Jira Tickets Related"] = baseRow["Jira Tickets Related"] || "";
@@ -2296,6 +2584,9 @@ function buildVotesSheetRows(state) {
         vote.areaId || "",
         vote.decision || "",
         vote.comment || "",
+        vote.voterEmail || "",
+        vote.voterName || "",
+        vote.voterArea || "",
         vote.createdAt || "",
       ]);
     });
@@ -2374,22 +2665,46 @@ function parseDecisionSheetRows(values) {
   };
 }
 
-function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map()) {
+function buildDecisionSheetHeaders(existingHeaders = []) {
+  const headerSet = new Set(
+    Array.isArray(existingHeaders) && existingHeaders.length
+      ? existingHeaders
+      : CCB_DECISION_HEADERS,
+  );
+
+  CCB_DECISION_HEADERS.forEach((header) => headerSet.add(header));
+  CCB_DECISION_AGGREGATE_HEADERS.forEach((header) => headerSet.add(header));
+
+  return Array.from(headerSet);
+}
+
+function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map(), decisionHeaders = CCB_DECISION_HEADERS) {
   const rows = state.openItems.map((item) => {
     const existingRecord = existingRowsByOpenItemId.get(item.id) || {};
     const baseRecord = {};
+    const ccbDecisionSummary = getOpenItemCcbDecisionSummary(item.id, state);
 
-    CCB_DECISION_HEADERS.forEach((header) => {
+    decisionHeaders.forEach((header) => {
       baseRecord[header] = String(existingRecord[header] || "").trim();
     });
 
     baseRecord.OI_ID = item.id || "";
     baseRecord["Open Item Description"] = item.title || "";
+    baseRecord["CCB Decision Average Score"] = ccbDecisionSummary?.averageWeightedScore == null ? "" : ccbDecisionSummary.averageWeightedScore;
+    baseRecord["CCB Decision Recommendation"] = ccbDecisionSummary?.recommendation || "INCOMPLETE";
+    baseRecord["CCB Decision Evaluator Count"] = ccbDecisionSummary?.evaluatorCount || 0;
+    baseRecord["CCB Decision Strategic Alignment Avg"] = ccbDecisionSummary?.criterionAverages?.["strategic-alignment"] == null ? "" : ccbDecisionSummary.criterionAverages["strategic-alignment"];
+    baseRecord["CCB Decision Risk Assessment Avg"] = ccbDecisionSummary?.criterionAverages?.["risk-assessment"] == null ? "" : ccbDecisionSummary.criterionAverages["risk-assessment"];
+    baseRecord["CCB Decision Resource Impact Avg"] = ccbDecisionSummary?.criterionAverages?.["resource-impact"] == null ? "" : ccbDecisionSummary.criterionAverages["resource-impact"];
+    baseRecord["CCB Decision Customer Value Avg"] = ccbDecisionSummary?.criterionAverages?.["customer-value"] == null ? "" : ccbDecisionSummary.criterionAverages["customer-value"];
+    baseRecord["CCB Decision Operational Feasibility Avg"] = ccbDecisionSummary?.criterionAverages?.["operational-feasibility"] == null ? "" : ccbDecisionSummary.criterionAverages["operational-feasibility"];
+    baseRecord["CCB Decision Last Updated"] = ccbDecisionSummary?.lastUpdated ? formatMexicoCityDateTime(ccbDecisionSummary.lastUpdated) : "";
+    baseRecord["CCB Decision Evaluators"] = Array.isArray(ccbDecisionSummary?.evaluators) ? ccbDecisionSummary.evaluators.join(", ") : "";
 
-    return CCB_DECISION_HEADERS.map((header) => baseRecord[header] || "");
+    return decisionHeaders.map((header) => baseRecord[header] || "");
   });
 
-  return [CCB_DECISION_HEADERS, ...rows];
+  return [decisionHeaders, ...rows];
 }
 
 function loadServiceAccountCredentials() {
@@ -2925,14 +3240,25 @@ function getPrimaryTableForSheet(sheetMetadata) {
   return tables[0] || null;
 }
 
-function buildTableResizeRequest(sheetMetadata, desiredEndRowIndex) {
+function buildTableResizeRequest(sheetMetadata, desiredEndRowIndex, desiredEndColumnIndex = null) {
   const table = getPrimaryTableForSheet(sheetMetadata);
   if (!table?.tableId || !table.range || desiredEndRowIndex == null) {
     return null;
   }
 
   const currentEndRowIndex = Number(table.range.endRowIndex);
-  if (!Number.isFinite(currentEndRowIndex) || desiredEndRowIndex <= currentEndRowIndex) {
+  const currentEndColumnIndex = Number(table.range.endColumnIndex);
+  const nextEndRowIndex = Number.isFinite(currentEndRowIndex)
+    ? (desiredEndRowIndex > currentEndRowIndex ? desiredEndRowIndex : currentEndRowIndex)
+    : desiredEndRowIndex;
+  const nextEndColumnIndex = Number.isFinite(desiredEndColumnIndex)
+    ? desiredEndColumnIndex
+    : currentEndColumnIndex;
+
+  if (
+    (!Number.isFinite(currentEndRowIndex) || nextEndRowIndex === currentEndRowIndex) &&
+    (!Number.isFinite(currentEndColumnIndex) || nextEndColumnIndex === currentEndColumnIndex)
+  ) {
     return null;
   }
 
@@ -2943,7 +3269,8 @@ function buildTableResizeRequest(sheetMetadata, desiredEndRowIndex) {
         name: table.name,
         range: {
           ...table.range,
-          endRowIndex: desiredEndRowIndex,
+          endRowIndex: nextEndRowIndex,
+          endColumnIndex: nextEndColumnIndex,
         },
       },
       fields: "range",
@@ -3069,6 +3396,7 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
   const existingValues = valuesMap.get(SOURCE_SHEET_NAME) || [];
   const existingFormulaValues = formulaMap.get(SOURCE_SHEET_NAME) || [];
   const context = getOpenItemSheetContext(existingValues);
+  const desiredHeaders = buildOpenItemHeaders(state, state.areas || []);
   const matchedSheet = getSheetMetadataByName(metadata, SOURCE_SHEET_NAME);
   const sheetId = matchedSheet?.properties?.sheetId ?? null;
   const checkboxColumns = Array.from(
@@ -3078,7 +3406,7 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
         .filter(Boolean),
     ),
   );
-  const headerWidth = Math.max(context.headerRow.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
+  const headerWidth = Math.max(context.headerRow.length, desiredHeaders.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
   const existingDataRowCount = Math.max(0, existingValues.length - context.headerRowNumber);
   const existingOwnerEmailById = await fetchOpenItemOwnerEmailMap(
     SOURCE_SHEET_NAME,
@@ -3095,13 +3423,25 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
   const formulaContext = getOpenItemSheetContext(existingFormulaValues);
   const formulaCopyRequests = buildFormulaCopyRequests({
     sheetId,
-    headerRow: context.headerRow,
+    headerRow: desiredHeaders,
     managedHeaders: buildManagedOpenItemHeaders(state.areas || []),
     lastFormulaRow: formulaContext.bodyRows[existingDataRowCount - 1] || [],
     existingDataRowCount,
     targetRowCount: rows.length,
     headerRowNumber: context.headerRowNumber,
   });
+
+  if (
+    desiredHeaders.length !== context.headerRow.length ||
+    desiredHeaders.some((header, index) => header !== context.headerRow[index])
+  ) {
+    const headerRange = `${SOURCE_SHEET_NAME}!A${context.headerRowNumber}:${endColumn}${context.headerRowNumber}`;
+    const paddedHeaders = [...desiredHeaders];
+    while (paddedHeaders.length < headerWidth) {
+      paddedHeaders.push("");
+    }
+    await writeSheetRange(headerRange, [paddedHeaders], "USER_ENTERED");
+  }
 
   await clearSheetRange(clearRange);
 
@@ -3111,7 +3451,7 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
   }
 
   await batchUpdateSpreadsheet(formulaCopyRequests);
-  const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + 1 + rows.length);
+  const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + 1 + rows.length, desiredHeaders.length);
   await batchUpdateSpreadsheet(tableResizeRequest ? [tableResizeRequest] : []);
 
   await applyOpenItemsCheckboxValidation(sheetId, context.headerRow, startRow, endRow, checkboxColumns);
@@ -3137,7 +3477,8 @@ async function writeDecisionSheetPreservingTemplate(state) {
     return;
   }
 
-  const decisionRows = buildDecisionSheetRows(state, rowsByOpenItemId);
+  const decisionHeaders = buildDecisionSheetHeaders(context.headerRow);
+  const decisionRows = buildDecisionSheetRows(state, rowsByOpenItemId, decisionHeaders);
   const nextDecisionRows = preserveDecisionFormulaCells(decisionRows.slice(1), existingValues, existingFormulaValues);
   const headerWidth = Math.max(
     context.headerRow.length,
@@ -3160,6 +3501,11 @@ async function writeDecisionSheetPreservingTemplate(state) {
     headerRowNumber: context.headerRowNumber,
   });
 
+  if (decisionHeaders.length !== context.headerRow.length || decisionHeaders.some((header, index) => header !== context.headerRow[index])) {
+    const headerRange = `${CCB_DECISION_SHEET_NAME}!A${context.headerRowNumber}:${endColumn}${context.headerRowNumber}`;
+    await writeSheetRange(headerRange, [decisionHeaders], "USER_ENTERED");
+  }
+
   await clearSheetRange(clearRange);
 
   if (nextDecisionRows.length) {
@@ -3168,7 +3514,7 @@ async function writeDecisionSheetPreservingTemplate(state) {
   }
 
   await batchUpdateSpreadsheet(formulaCopyRequests);
-  const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + decisionRows.length);
+  const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + decisionRows.length, headerWidth);
   await batchUpdateSpreadsheet(tableResizeRequest ? [tableResizeRequest] : []);
 }
 
@@ -3190,18 +3536,22 @@ async function loadStateFromGoogleSheets() {
   if (existingSheets.has(CCB_EVALUATIONS_SHEET_NAME)) {
     ranges.push(CCB_EVALUATIONS_SHEET_NAME);
   }
+  if (existingSheets.has(CCB_DECISION_SHEET_NAME)) {
+    ranges.push(CCB_DECISION_SHEET_NAME);
+  }
   const valueMap = await batchGetSpreadsheetValues(ranges);
   const openItemValues = valueMap.get(SOURCE_SHEET_NAME) || [];
   const areaValues = valueMap.get(AREAS_SHEET_NAME) || [];
   const voteValues = valueMap.get(VOTES_SHEET_NAME) || [];
   const preSessionValues = valueMap.get(PRESESSION_SHEET_NAME) || [];
   const evaluationValues = valueMap.get(CCB_EVALUATIONS_SHEET_NAME) || [];
+  const decisionValues = valueMap.get(CCB_DECISION_SHEET_NAME) || [];
   const openItemContext = getOpenItemSheetContext(openItemValues);
   const areas = parseAreasSheetRows(areaValues);
   const votesMap = parseVotesSheetRows(voteValues);
   const preSessionChecksMap = parsePreSessionSheetRows(preSessionValues);
   const ccbEvaluations = parseCcbEvaluationRows(evaluationValues);
-  const ccbDecisionCriteria = loadCcbDecisionCriteria(existingSheets.has(CCB_DECISION_SHEET_NAME) ? (valueMap.get(CCB_DECISION_SHEET_NAME) || []) : []);
+  const ccbDecisionCriteria = loadCcbDecisionCriteria(decisionValues);
   const effectiveAreas = areas.length ? areas : getAreaDirectory();
   const snapshot = {
     spreadsheetId: SOURCE_SPREADSHEET_ID,
@@ -3231,11 +3581,22 @@ async function loadStateFromGoogleSheets() {
   const state = mapSnapshotToState(snapshot, null, effectiveAreas, votesMap, preSessionChecksMap);
   state.ccbDecisionCriteria = ccbDecisionCriteria;
   state.ccbEvaluations = ccbEvaluations;
+  state.openItems.forEach((item) => {
+    const tracking = deriveOpenItemTracking(state, item);
+    item.impactedAreaIds = tracking.impactedAreaIds;
+    item.impactedAreas = tracking.impactedAreas;
+    item.impactedUsers = tracking.impactedUsers;
+    item.evaluationParticipants = tracking.evaluationParticipants;
+    item.voteParticipants = tracking.voteParticipants;
+    item.pendingEvaluators = tracking.pendingEvaluators;
+    item.lastEvaluationDate = tracking.lastEvaluationDate;
+    updateOpenItemCcbDecision(item.id, null, state);
+  });
   state.source = {
     ...state.source,
     type: "google-sheets",
     sheetName: SOURCE_SHEET_NAME,
-    sheetHeaders: snapshot.headers,
+    sheetHeaders: stripOpenItemDecisionHeaders(snapshot.headers),
   };
   return state;
 }
@@ -3245,13 +3606,17 @@ async function persistStateToGoogleSheets(nextState) {
   const existingState = await loadStateFromGoogleSheets();
   const areas = resolveAreas(normalizedState.areas, existingState);
   normalizedState.areas = areas;
+  normalizedState.source = {
+    ...(normalizedState.source || {}),
+    sheetHeaders: stripOpenItemDecisionHeaders(existingState?.source?.sheetHeaders || normalizedState.source?.sheetHeaders || []),
+  };
   const headers = buildOpenItemHeaders(normalizedState, areas);
   normalizedState.source = {
     ...(normalizedState.source || {}),
     type: "google-sheets",
     spreadsheetId: SOURCE_SPREADSHEET_ID,
     sheetName: SOURCE_SHEET_NAME,
-    sheetHeaders: headers,
+    sheetHeaders: stripOpenItemDecisionHeaders(headers),
   };
   const openItemRows = buildOpenItemsRowsFromState(normalizedState, areas);
   const areaRows = buildAreasSheetRows(areas);
@@ -3377,6 +3742,26 @@ function sanitizeState(input) {
           ownerEmail: normalizeEmail(item.ownerEmail),
           ownerAreaHint: item.ownerAreaHint || "",
           impactedAreaIds: Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds : [],
+          impactedUsers: Array.isArray(item.impactedUsers) ? item.impactedUsers.map((value) => normalizeEmail(value)).filter(Boolean) : [],
+          impactedAreas: Array.isArray(item.impactedAreas) ? item.impactedAreas.map((value) => String(value || "").trim()).filter(Boolean) : [],
+          evaluationParticipants: Array.isArray(item.evaluationParticipants) ? item.evaluationParticipants.map((value) => normalizeEmail(value)).filter(Boolean) : [],
+          voteParticipants: Array.isArray(item.voteParticipants) ? item.voteParticipants.map((value) => normalizeEmail(value)).filter(Boolean) : [],
+          pendingEvaluators: Array.isArray(item.pendingEvaluators) ? item.pendingEvaluators.map((value) => normalizeEmail(value)).filter(Boolean) : [],
+          lastEvaluationDate: item.lastEvaluationDate || "",
+          ccbDecisionAverageScore: item.ccbDecisionAverageScore == null ? null : Number(item.ccbDecisionAverageScore),
+          ccbDecisionRecommendation: String(item.ccbDecisionRecommendation || "").trim(),
+          ccbDecisionEvaluatorCount: Number(item.ccbDecisionEvaluatorCount || 0),
+          ccbDecisionCriterionAverages: item.ccbDecisionCriterionAverages && typeof item.ccbDecisionCriterionAverages === "object"
+            ? {
+                "strategic-alignment": parseScore(item.ccbDecisionCriterionAverages["strategic-alignment"]),
+                "risk-assessment": parseScore(item.ccbDecisionCriterionAverages["risk-assessment"]),
+                "resource-impact": parseScore(item.ccbDecisionCriterionAverages["resource-impact"]),
+                "customer-value": parseScore(item.ccbDecisionCriterionAverages["customer-value"]),
+                "operational-feasibility": parseScore(item.ccbDecisionCriterionAverages["operational-feasibility"]),
+              }
+            : {},
+          ccbDecisionLastUpdated: item.ccbDecisionLastUpdated || "",
+          ccbDecisionEvaluators: Array.isArray(item.ccbDecisionEvaluators) ? item.ccbDecisionEvaluators.map((value) => String(value || "").trim()).filter(Boolean) : [],
           isSubstantial: Boolean(item.isSubstantial),
           status: item.status || "open",
           createdAt: item.createdAt || new Date().toISOString(),
@@ -3400,6 +3785,9 @@ function sanitizeState(input) {
                 areaId: vote.areaId,
                 decision: vote.decision,
                 comment: vote.comment || "",
+                voterEmail: normalizeEmail(vote.voterEmail),
+                voterName: String(vote.voterName || "").trim(),
+                voterArea: String(vote.voterArea || "").trim(),
                 createdAt: vote.createdAt || new Date().toISOString(),
               }))
             : [],

@@ -132,9 +132,11 @@ let preSessionDashboard = null;
 let autoSavePromise = null;
 let selectedPreSessionJobOpenItemId = "";
 let selectedDailyReportOpenItemId = "";
+let selectedOpenItemsImpactTab = "impacting";
 let selectedOpenItemsStatusTab = "NEW";
 let selectedOpenItemId = "";
 const expandedEvaluationPanels = new Set();
+const evaluationUiState = new Map();
 const deepLinkState = {
   tab: "summary",
   openItemId: "",
@@ -461,10 +463,10 @@ function getEvaluationWarnings(openItem, evaluation) {
     const entry = byCriterion.get(criterion.id) || {};
     const score = Number(entry.score);
     if (!Number.isInteger(score) || score < 1 || score > 5) {
-      warnings.push(`${criterion.name}: score required.`);
+      warnings.push(`Please select a score for ${criterion.name}.`);
     }
     if (!String(entry.rationale || "").trim()) {
-      warnings.push(`${criterion.name}: rationale required.`);
+      warnings.push(`Please provide a decision justification for ${criterion.name}.`);
     }
   });
 
@@ -509,37 +511,80 @@ function buildEvaluationDraft(openItemId, evaluatorEmail) {
 
 function getEvaluationSummary(openItem) {
   const criteria = loadCcbDecisionCriteria();
-  const grouped = new Map();
-  (state.ccbEvaluations || [])
-    .filter((entry) => entry.openItemId === openItem.id)
-    .forEach((entry) => {
-      const key = String(entry.evaluatorEmail || "").trim().toLowerCase();
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
-      }
-      grouped.get(key).push(entry);
-    });
-
-  const completeScores = Array.from(grouped.values())
-    .map((entries) => calculateWeightedScore(entries))
-    .filter((value) => Number.isFinite(value));
-  const averageScore = completeScores.length
-    ? Number((completeScores.reduce((sum, value) => sum + value, 0) / completeScores.length).toFixed(2))
-    : null;
   const currentUserEntries = getEvaluationForUser(openItem.id, getCurrentEvaluator().email);
   const currentUserScore = calculateWeightedScore(currentUserEntries);
-  const recommendation = getDecisionRecommendation(averageScore);
-  const totalEvaluators = grouped.size;
-  const fastTrack = Array.from(grouped.values()).some((entries) => getEvaluationWarnings(openItem, entries).includes("Fast-track candidate"));
+  const averageScore = openItem.ccbDecisionAverageScore == null ? null : Number(openItem.ccbDecisionAverageScore);
+  const recommendation = openItem.ccbDecisionRecommendation || getDecisionRecommendation(averageScore);
+  const totalEvaluators = Number(openItem.ccbDecisionEvaluatorCount || 0);
+  const fastTrack = (openItem.ccbDecisionEvaluators || []).length
+    ? (state.ccbEvaluations || [])
+        .filter((entry) => entry.openItemId === openItem.id)
+        .reduce((groups, entry) => {
+          const key = String(entry.evaluatorEmail || "").trim().toLowerCase();
+          groups.set(key, [...(groups.get(key) || []), entry]);
+          return groups;
+        }, new Map())
+        .values()
+    : [];
+  const hasFastTrack = Array.from(fastTrack).some((entries) => getEvaluationWarnings(openItem, entries).includes("Fast-track candidate"));
 
   return {
     currentUserScore,
     averageScore,
     totalEvaluators,
     recommendation: totalEvaluators ? recommendation : "INCOMPLETE",
-    fastTrack,
+    fastTrack: hasFastTrack,
     criteriaCount: criteria.length,
+    criterionAverages: openItem.ccbDecisionCriterionAverages || {},
+    lastUpdated: openItem.ccbDecisionLastUpdated || "",
+    evaluators: Array.isArray(openItem.ccbDecisionEvaluators) ? openItem.ccbDecisionEvaluators : [],
   };
+}
+
+function isPrivilegedOpenItemsViewer() {
+  const evaluator = getCurrentEvaluator();
+  const email = evaluator.email;
+  return evaluator.area === "CM" || /admin|coordinator/i.test(email);
+}
+
+function getOpenItemImpactContext(openItem) {
+  const evaluator = getCurrentEvaluator();
+  const email = evaluator.email;
+  const areaId = evaluator.area;
+  const userEvaluation = getEvaluationForUser(openItem.id, email);
+  const userVote = (openItem.votes || []).some((vote) => (
+    (vote.voterEmail || "").trim().toLowerCase() === email || vote.areaId === areaId
+  ));
+  const impactingMe = Boolean(
+    (areaId && (openItem.impactedAreaIds || []).includes(areaId)) ||
+    (email && (openItem.impactedUsers || []).includes(email)) ||
+    userVote ||
+    userEvaluation.length
+  );
+  const evaluationComplete = Number.isFinite(calculateWeightedScore(userEvaluation));
+  const voteSubmitted = userVote;
+  const pendingEvaluation = impactingMe && !evaluationComplete;
+  const awaitingResponse = impactingMe && !evaluationComplete && !voteSubmitted;
+
+  return {
+    impactingMe,
+    evaluationComplete,
+    voteSubmitted,
+    pendingEvaluation,
+    awaitingResponse,
+    autoAssigned: email && (openItem.impactedUsers || []).includes(email),
+  };
+}
+
+function getOpenItemPriority(item) {
+  const context = getOpenItemImpactContext(item);
+  if (context.impactingMe && context.pendingEvaluation) {
+    return 3;
+  }
+  if (context.impactingMe && context.evaluationComplete) {
+    return 2;
+  }
+  return 1;
 }
 
 async function saveCcbEvaluation(openItemId, evaluator, evaluation) {
@@ -964,10 +1009,35 @@ function renderVotes(votes) {
 
 function renderEvaluationSummary(openItem) {
   const summary = getEvaluationSummary(openItem);
+  const impactContext = getOpenItemImpactContext(openItem);
   const currentUserScoreLabel = Number.isFinite(summary.currentUserScore) ? summary.currentUserScore.toFixed(2) : "N/A";
   const averageScoreLabel = Number.isFinite(summary.averageScore) ? summary.averageScore.toFixed(2) : "N/A";
+  const criteria = loadCcbDecisionCriteria();
+  const statusBadges = [
+    impactContext.pendingEvaluation ? '<span class="reference-badge">Pending evaluation</span>' : "",
+    impactContext.evaluationComplete ? '<span class="reference-badge">Evaluation completed</span>' : "",
+    impactContext.voteSubmitted ? '<span class="reference-badge">Vote submitted</span>' : "",
+    impactContext.awaitingResponse ? '<span class="reference-badge">Awaiting response</span>' : "",
+  ].filter(Boolean).join("");
   return `
     <div class="evaluation-summary">
+      <div class="evaluation-score-summary">
+        <h4>CCB Decision Score</h4>
+        <div class="evaluation-score-meta">
+          <div><span>Average Score</span><strong>${averageScoreLabel}</strong></div>
+          <div><span>Recommendation</span><strong>${summary.recommendation}</strong></div>
+          <div><span>Evaluators</span><strong>${summary.totalEvaluators}</strong></div>
+          <div><span>Last Updated</span><strong>${summary.lastUpdated ? formatDateTime(summary.lastUpdated) : "N/A"}</strong></div>
+        </div>
+        <div class="evaluation-criterion-averages">
+          <span>Criterion Averages</span>
+          <ul>
+            ${criteria.map((criterion) => `
+              <li>${escapeHtml(criterion.name)}: ${summary.criterionAverages?.[criterion.id] == null ? "N/A" : Number(summary.criterionAverages[criterion.id]).toFixed(2)}</li>
+            `).join("")}
+          </ul>
+        </div>
+      </div>
       <div class="evaluation-summary-grid">
         <div><span>My score</span><strong>${currentUserScoreLabel}</strong></div>
         <div><span>Average</span><strong>${averageScoreLabel}</strong></div>
@@ -977,6 +1047,7 @@ function renderEvaluationSummary(openItem) {
       <div class="evaluation-summary-actions">
         <span class="decision-pill" data-decision="${summary.recommendation.toLowerCase()}">${summary.recommendation}</span>
         ${summary.fastTrack ? '<span class="reference-badge">Fast-track candidate</span>' : ""}
+        ${statusBadges}
       </div>
     </div>
   `;
@@ -985,10 +1056,33 @@ function renderEvaluationSummary(openItem) {
 function renderOpenItems() {
   openItemsList.innerHTML = "";
 
-  const activeItems = state.openItems
+  const allActiveItems = state.openItems
     .filter((item) => item.status !== "closed")
     .slice()
-    .sort((a, b) => Number(b.isSubstantial) - Number(a.isSubstantial) || a.id.localeCompare(b.id));
+    .sort((a, b) => getOpenItemPriority(b) - getOpenItemPriority(a) || Number(b.isSubstantial) - Number(a.isSubstantial) || a.id.localeCompare(b.id));
+  const canSeeAllOpenItems = isPrivilegedOpenItemsViewer();
+  const impactTabs = [
+    {
+      id: "impacting",
+      label: "Impacting Me",
+      items: allActiveItems.filter((item) => getOpenItemImpactContext(item).impactingMe),
+    },
+    {
+      id: "not-impacting",
+      label: "Not Impacting Me",
+      items: allActiveItems.filter((item) => !getOpenItemImpactContext(item).impactingMe),
+    },
+    ...(canSeeAllOpenItems ? [{
+      id: "all",
+      label: "All Open Items",
+      items: allActiveItems,
+    }] : []),
+  ];
+  if (!impactTabs.some((tab) => tab.id === selectedOpenItemsImpactTab)) {
+    selectedOpenItemsImpactTab = "impacting";
+  }
+  const selectedImpactTab = impactTabs.find((tab) => tab.id === selectedOpenItemsImpactTab) || impactTabs[0];
+  const activeItems = selectedImpactTab?.items || [];
   const groupedItems = {
     NEW: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "NEW"),
     APPROVED: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "APPROVED"),
@@ -1012,6 +1106,8 @@ function renderOpenItems() {
 
   const renderOpenItemCard = (item) => {
     const node = openItemTemplate.content.firstElementChild.cloneNode(true);
+    const impactContext = getOpenItemImpactContext(item);
+    node.classList.toggle("open-item-card--impacting", impactContext.impactingMe);
     node.querySelector(".item-id").textContent = item.id;
     node.querySelector(".item-title").textContent = item.title;
     node.querySelector(".badge").textContent = item.isSubstantial ? "Substantial" : item.status;
@@ -1095,16 +1191,28 @@ function renderOpenItems() {
       voteAreaSelect.appendChild(option);
     });
 
-    node.querySelector(".vote-form").addEventListener("submit", (event) => {
+    node.querySelector(".vote-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const formData = new FormData(event.currentTarget);
+      const evaluator = getCurrentEvaluator();
       item.votes.push({
         areaId: formData.get("areaId"),
         decision: formData.get("decision"),
         comment: String(formData.get("comment") || "").trim(),
+        voterEmail: evaluator.email,
+        voterName: evaluator.name,
+        voterArea: evaluator.area,
         createdAt: new Date().toISOString(),
       });
+      if (evaluator.area && !item.impactedAreaIds.includes(evaluator.area)) {
+        item.impactedAreaIds.push(evaluator.area);
+      }
       refreshDerivedViews();
+      try {
+        await saveStateSilently();
+      } catch (error) {
+        window.alert(error.message || "No se pudo guardar el voto.");
+      }
     });
 
     node.querySelector(".close-item-button").addEventListener("click", () => {
@@ -1118,23 +1226,35 @@ function renderOpenItems() {
     const evaluator = getCurrentEvaluator();
     const criteria = loadCcbDecisionCriteria();
     let evaluationDraft = buildEvaluationDraft(item.id, evaluator.email);
+    const uiKey = `${item.id}:${evaluator.email || "anon"}`;
+    const validationState = evaluationUiState.get(uiKey) || { touched: {}, attemptedSave: false };
+    evaluationUiState.set(uiKey, validationState);
     const renderEvaluationPanel = () => {
       const weightedScore = calculateWeightedScore(evaluationDraft);
       const recommendation = getDecisionRecommendation(weightedScore);
       const warnings = getEvaluationWarnings(item, evaluationDraft);
+      const shouldShowGlobalWarnings = validationState.attemptedSave;
+      const visibleWarnings = shouldShowGlobalWarnings
+        ? warnings.filter((warning) => !warning.includes(": score required.") && !warning.includes(": rationale required."))
+        : [];
       evaluationSummaryHost.innerHTML = renderEvaluationSummary(item);
 
       evaluationPanel.innerHTML = `
         <div class="evaluation-panel-shell">
+          <p class="meta-line">${impactContext.impactingMe ? "Your evaluation is requested for this item." : "You may still provide an optional evaluation."}</p>
           <p class="meta-line">Score each criterion using the official CCB Decision criteria. The weighted score will drive the recommendation, but final CCB approval remains a board decision.</p>
           <div class="evaluation-overview">
             <div><span>Total weighted score</span><strong>${Number.isFinite(weightedScore) ? weightedScore.toFixed(2) : "Incomplete"}</strong></div>
             <div><span>Recommendation</span><strong>${recommendation}</strong></div>
           </div>
-          ${warnings.length ? `<div class="evaluation-warning-list">${warnings.map((warning) => `<div class="evaluation-warning">${escapeHtml(warning)}</div>`).join("")}</div>` : ""}
+          ${visibleWarnings.length ? `<div class="evaluation-warning-list">${visibleWarnings.map((warning) => `<div class="evaluation-warning">${escapeHtml(warning)}</div>`).join("")}</div>` : ""}
           <div class="evaluation-criteria-list">
             ${criteria.map((criterion) => {
               const entry = evaluationDraft.find((candidate) => candidate.criterionId === criterion.id) || {};
+              const rationaleTouched = Boolean(validationState.touched[`${criterion.id}:rationale`]);
+              const scoreTouched = Boolean(validationState.touched[`${criterion.id}:score`]);
+              const showRationaleError = (validationState.attemptedSave || rationaleTouched) && !String(entry.rationale || "").trim();
+              const showScoreError = (validationState.attemptedSave || scoreTouched) && !Number.isInteger(Number(entry.score));
               return `
                 <section class="evaluation-criterion-card" data-criterion-id="${escapeHtml(criterion.id)}">
                   <div class="evaluation-criterion-head">
@@ -1167,11 +1287,14 @@ function renderOpenItems() {
                         >${score}</button>
                       `).join("")}
                     </div>
+                    ${showScoreError ? `<div class="evaluation-inline-warning">Please select a score for ${escapeHtml(criterion.name)}.</div>` : ""}
                   </div>
                   <div class="stack">
                     <div>
-                      <p class="field-label">Rationale</p>
-                      <textarea data-evaluation-rationale data-criterion-id="${escapeHtml(criterion.id)}" rows="3" placeholder="Required rationale">${escapeHtml(entry.rationale || "")}</textarea>
+                      <p class="field-label">Decision justification</p>
+                      <textarea data-evaluation-rationale data-criterion-id="${escapeHtml(criterion.id)}" rows="3" placeholder="Required decision justification">${escapeHtml(entry.rationale || "")}</textarea>
+                      <p class="evaluation-helper-text">Explain why this score was selected.</p>
+                      ${showRationaleError ? `<div class="evaluation-inline-warning">Please provide a decision justification for ${escapeHtml(criterion.name)}.</div>` : ""}
                     </div>
                     <div>
                       <p class="field-label">Supporting data / reference</p>
@@ -1199,6 +1322,7 @@ function renderOpenItems() {
       evaluationPanel.querySelectorAll("[data-evaluation-score]").forEach((button) => {
         button.addEventListener("click", () => {
           const criterionId = button.dataset.criterionId;
+          validationState.touched[`${criterionId}:score`] = true;
           updateDraft();
           evaluationPanel.querySelectorAll(`[data-evaluation-score][data-criterion-id="${criterionId}"]`).forEach((candidate) => candidate.classList.remove("is-active"));
           button.classList.add("is-active");
@@ -1207,9 +1331,37 @@ function renderOpenItems() {
         });
       });
 
+      evaluationPanel.querySelectorAll("[data-evaluation-rationale]").forEach((field) => {
+        field.addEventListener("blur", () => {
+          validationState.touched[`${field.dataset.criterionId}:rationale`] = true;
+          updateDraft();
+          renderEvaluationPanel();
+        });
+        field.addEventListener("input", () => {
+          updateDraft();
+        });
+      });
+
+      evaluationPanel.querySelectorAll("[data-evaluation-supporting]").forEach((field) => {
+        field.addEventListener("input", () => {
+          updateDraft();
+        });
+      });
+
       evaluationPanel.querySelector("[data-save-evaluation]")?.addEventListener("click", async () => {
+        validationState.attemptedSave = true;
         updateDraft();
+        const blockingWarnings = getEvaluationWarnings(item, evaluationDraft).filter((warning) => (
+          warning.startsWith("Please select a score") || warning.startsWith("Please provide a decision justification")
+        ));
+        if (blockingWarnings.length) {
+          renderEvaluationPanel();
+          return;
+        }
         try {
+          if (evaluator.area && !item.impactedAreaIds.includes(evaluator.area)) {
+            item.impactedAreaIds.push(evaluator.area);
+          }
           const payload = await saveCcbEvaluation(item.id, evaluator, evaluationDraft);
           Object.assign(state, payload.state);
           renderReferencePanels();
@@ -1221,7 +1373,11 @@ function renderOpenItems() {
     };
 
     evaluationSummaryHost.innerHTML = renderEvaluationSummary(item);
-    const isExpanded = expandedEvaluationPanels.has(item.id);
+    const shouldDefaultExpand = impactContext.impactingMe && impactContext.pendingEvaluation;
+    const isExpanded = expandedEvaluationPanels.has(item.id) || shouldDefaultExpand;
+    if (shouldDefaultExpand) {
+      expandedEvaluationPanels.add(item.id);
+    }
     evaluationPanel.hidden = !isExpanded;
     if (isExpanded) {
       renderEvaluationPanel();
@@ -1247,6 +1403,18 @@ function renderOpenItems() {
 
   openItemsList.innerHTML = `
     <div class="open-items-shell">
+      <div class="open-items-impact-tabs" role="tablist" aria-label="Impact filter">
+        ${impactTabs.map((tab) => `
+          <button
+            type="button"
+            class="open-items-impact-tab${selectedOpenItemsImpactTab === tab.id ? " is-active" : ""}"
+            data-open-items-impact-tab="${escapeHtml(tab.id)}"
+          >
+            <span>${escapeHtml(tab.label)}</span>
+            <strong>${tab.items.length}</strong>
+          </button>
+        `).join("")}
+      </div>
       <div class="open-items-status-tabs" role="tablist" aria-label="Estados de open items">
         ${availableStatusTabs.map(([status, items]) => `
           <button
@@ -1274,6 +1442,14 @@ function renderOpenItems() {
       <div class="open-items-active-card"></div>
     </div>
   `;
+
+  openItemsList.querySelectorAll("[data-open-items-impact-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedOpenItemsImpactTab = button.dataset.openItemsImpactTab || "impacting";
+      selectedOpenItemId = "";
+      renderOpenItems();
+    });
+  });
 
   openItemsList.querySelectorAll("[data-open-items-status-tab]").forEach((button) => {
     button.addEventListener("click", () => {
