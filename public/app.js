@@ -1,6 +1,8 @@
 const state = {
   areas: [],
   openItems: [],
+  ccbDecisionCriteria: [],
+  ccbEvaluations: [],
   lastSavedAt: null,
   source: null,
 };
@@ -76,34 +78,44 @@ const OIL_GUIDELINES = [
 
 const CCB_FRAMEWORK = [
   {
-    title: "Strategic Alignment",
-    weight: "0.30",
-    note: "Debe puntuar >= 4 para aprobar.",
-    bullets: ["Supports product roadmap", "Advances business goals", "Enhances competitive position"],
+    id: "strategic-alignment",
+    name: "Strategic Alignment",
+    weight: 0.3,
+    note: "Strategic Alignment must score >=4 for approval.",
+    factors: ["Supports product roadmap", "Advances business goals", "Enhances competitive position"],
+    scoringGuide: ["1 = Misaligned", "3 = Neutral", "5 = Fully aligned"],
   },
   {
-    title: "Risk Assessment",
-    weight: "0.25",
-    note: "Rechazar si safety/compliance risk > 3.",
-    bullets: ["Technical complexity", "Safety/compliance risks", "Customer impact if failed"],
+    id: "risk-assessment",
+    name: "Risk Assessment",
+    weight: 0.25,
+    note: "Reject if safety/compliance risk >3.",
+    factors: ["Technical complexity", "Safety/compliance risks", "Customer impact if failed"],
+    scoringGuide: ["1 = High risk", "3 = Moderate", "5 = Low risk"],
   },
   {
-    title: "Resource Impact",
-    weight: "0.20",
-    note: "Levantar bandera si score <= 2.",
-    bullets: ["Engineering hours", "Cost (dev, testing, rollout)", "Timeline disruption"],
+    id: "resource-impact",
+    name: "Resource Impact",
+    weight: 0.2,
+    note: "Flag if score <=2.",
+    factors: ["Engineering hours", "Cost (dev, testing, rollout)", "Timeline disruption"],
+    scoringGuide: ["1 = Major impact, >20% budget/timeline", "5 = Minimal impact, <5%"],
   },
   {
-    title: "Customer Value",
-    weight: "0.15",
-    note: "Requiere supporting data.",
-    bullets: ["Solves critical pain points", "Expected adoption/upsell", "CSAT/NPS impact"],
+    id: "customer-value",
+    name: "Customer Value",
+    weight: 0.15,
+    note: "Requires supporting data.",
+    factors: ["Solves critical pain points", "Expected adoption/upsell", "CSAT/NPS impact"],
+    scoringGuide: ["1 = Low value", "5 = High value / churn reduction"],
   },
   {
-    title: "Operational Feasibility",
-    weight: "0.10",
-    note: "Evalua si realmente se puede ejecutar ahora.",
-    bullets: ["Ease of implementation", "Maintenance burden", "Supplier/partner readiness"],
+    id: "operational-feasibility",
+    name: "Operational Feasibility",
+    weight: 0.1,
+    note: "Ease of execution and supportability.",
+    factors: ["Ease of implementation", "Maintenance burden", "Supplier/partner readiness"],
+    scoringGuide: ["1 = Not feasible", "5 = Easily executable"],
   },
 ];
 
@@ -122,6 +134,7 @@ let selectedPreSessionJobOpenItemId = "";
 let selectedDailyReportOpenItemId = "";
 let selectedOpenItemsStatusTab = "NEW";
 let selectedOpenItemId = "";
+const expandedEvaluationPanels = new Set();
 const deepLinkState = {
   tab: "summary",
   openItemId: "",
@@ -386,6 +399,164 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function loadCcbDecisionCriteria() {
+  return Array.isArray(state.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+    ? state.ccbDecisionCriteria
+    : CCB_FRAMEWORK;
+}
+
+function getCurrentEvaluator() {
+  const user = authConfig?.user || {};
+  const evaluatorArea = state.areas.find((area) => (area.email || "").trim().toLowerCase() === (user.email || "").trim().toLowerCase());
+  return {
+    email: (user.email || "").trim().toLowerCase(),
+    name: (user.name || "").trim(),
+    area: evaluatorArea?.id || "",
+  };
+}
+
+function getEvaluationForUser(openItemId, evaluatorEmail) {
+  const normalizedEmail = String(evaluatorEmail || "").trim().toLowerCase();
+  return (state.ccbEvaluations || []).filter((entry) => (
+    entry.openItemId === openItemId && String(entry.evaluatorEmail || "").trim().toLowerCase() === normalizedEmail
+  ));
+}
+
+function calculateWeightedScore(evaluation) {
+  const criteria = loadCcbDecisionCriteria();
+  const byCriterion = new Map((evaluation || []).map((entry) => [entry.criterionId, entry]));
+  const allScored = criteria.every((criterion) => {
+    const score = Number(byCriterion.get(criterion.id)?.score);
+    return Number.isInteger(score) && score >= 1 && score <= 5;
+  });
+  if (!allScored) {
+    return null;
+  }
+  return Number(criteria.reduce((sum, criterion) => {
+    const score = Number(byCriterion.get(criterion.id)?.score || 0);
+    return sum + (score * Number(criterion.weight || 0));
+  }, 0).toFixed(2));
+}
+
+function getDecisionRecommendation(weightedScore) {
+  const score = Number(weightedScore);
+  if (!Number.isFinite(score)) {
+    return "INCOMPLETE";
+  }
+  if (score >= 4) {
+    return "APPROVE";
+  }
+  if (score >= 3) {
+    return "DEFER";
+  }
+  return "REJECT";
+}
+
+function getEvaluationWarnings(openItem, evaluation) {
+  const criteria = loadCcbDecisionCriteria();
+  const byCriterion = new Map((evaluation || []).map((entry) => [entry.criterionId, entry]));
+  const warnings = [];
+
+  criteria.forEach((criterion) => {
+    const entry = byCriterion.get(criterion.id) || {};
+    const score = Number(entry.score);
+    if (!Number.isInteger(score) || score < 1 || score > 5) {
+      warnings.push(`${criterion.name}: score required.`);
+    }
+    if (!String(entry.rationale || "").trim()) {
+      warnings.push(`${criterion.name}: rationale required.`);
+    }
+  });
+
+  const strategicScore = Number(byCriterion.get("strategic-alignment")?.score || 0);
+  if (strategicScore > 0 && strategicScore < 4) {
+    warnings.push("Strategic Alignment must score >=4 for approval.");
+  }
+
+  const resourceScore = Number(byCriterion.get("resource-impact")?.score || 0);
+  if (resourceScore > 0 && resourceScore <= 2) {
+    warnings.push("Resource impact is high and should be flagged.");
+  }
+
+  const riskScore = Number(byCriterion.get("risk-assessment")?.score || 0);
+  const searchableText = [
+    openItem?.title,
+    openItem?.description,
+    ...(evaluation || []).map((entry) => `${entry.rationale || ""} ${entry.supportingReference || ""}`),
+  ].join(" ").toLowerCase();
+  if (riskScore === 5 && resourceScore === 5 && /(critical|security|legal|compliance|regulatory|privacy|gdpr|safety)/i.test(searchableText)) {
+    warnings.push("Fast-track candidate");
+  }
+
+  return warnings;
+}
+
+function buildEvaluationDraft(openItemId, evaluatorEmail) {
+  const criteria = loadCcbDecisionCriteria();
+  const existing = new Map(getEvaluationForUser(openItemId, evaluatorEmail).map((entry) => [entry.criterionId, entry]));
+  return criteria.map((criterion) => {
+    const entry = existing.get(criterion.id) || {};
+    return {
+      criterionId: criterion.id,
+      criterionName: criterion.name,
+      weight: Number(criterion.weight || 0),
+      score: entry.score || "",
+      rationale: entry.rationale || "",
+      supportingReference: entry.supportingReference || "",
+    };
+  });
+}
+
+function getEvaluationSummary(openItem) {
+  const criteria = loadCcbDecisionCriteria();
+  const grouped = new Map();
+  (state.ccbEvaluations || [])
+    .filter((entry) => entry.openItemId === openItem.id)
+    .forEach((entry) => {
+      const key = String(entry.evaluatorEmail || "").trim().toLowerCase();
+      if (!grouped.has(key)) {
+        grouped.set(key, []);
+      }
+      grouped.get(key).push(entry);
+    });
+
+  const completeScores = Array.from(grouped.values())
+    .map((entries) => calculateWeightedScore(entries))
+    .filter((value) => Number.isFinite(value));
+  const averageScore = completeScores.length
+    ? Number((completeScores.reduce((sum, value) => sum + value, 0) / completeScores.length).toFixed(2))
+    : null;
+  const currentUserEntries = getEvaluationForUser(openItem.id, getCurrentEvaluator().email);
+  const currentUserScore = calculateWeightedScore(currentUserEntries);
+  const recommendation = getDecisionRecommendation(averageScore);
+  const totalEvaluators = grouped.size;
+  const fastTrack = Array.from(grouped.values()).some((entries) => getEvaluationWarnings(openItem, entries).includes("Fast-track candidate"));
+
+  return {
+    currentUserScore,
+    averageScore,
+    totalEvaluators,
+    recommendation: totalEvaluators ? recommendation : "INCOMPLETE",
+    fastTrack,
+    criteriaCount: criteria.length,
+  };
+}
+
+async function saveCcbEvaluation(openItemId, evaluator, evaluation) {
+  const response = await fetch(apiUrl("/api/ccb-evaluations/save"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      openItemId,
+      evaluator,
+      criteria: evaluation,
+    }),
+  });
+  const payload = await parseApiResponse(response, "No se pudo guardar la evaluacion CCB.");
+  Object.assign(state, payload.state);
+  return payload;
+}
+
 function renderSourceStatus() {
   const source = state.source || {};
   const sourceType = source.type || "local";
@@ -419,12 +590,12 @@ function renderReferencePanels() {
   `).join("");
 
   decisionFramework.innerHTML = [
-    ...CCB_FRAMEWORK.map((item) => `
+    ...loadCcbDecisionCriteria().map((item) => `
       <article class="reference-card">
-        <h3>${item.title}</h3>
+        <h3>${item.name}</h3>
         <p>${item.note}</p>
-        <ul>${item.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
-        <span class="reference-badge">Weight ${item.weight}</span>
+        <ul>${(item.factors || []).map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
+        <span class="reference-badge">Weight ${Number(item.weight || 0).toFixed(2)}</span>
       </article>
     `),
     `
@@ -791,6 +962,26 @@ function renderVotes(votes) {
     .join("");
 }
 
+function renderEvaluationSummary(openItem) {
+  const summary = getEvaluationSummary(openItem);
+  const currentUserScoreLabel = Number.isFinite(summary.currentUserScore) ? summary.currentUserScore.toFixed(2) : "N/A";
+  const averageScoreLabel = Number.isFinite(summary.averageScore) ? summary.averageScore.toFixed(2) : "N/A";
+  return `
+    <div class="evaluation-summary">
+      <div class="evaluation-summary-grid">
+        <div><span>My score</span><strong>${currentUserScoreLabel}</strong></div>
+        <div><span>Average</span><strong>${averageScoreLabel}</strong></div>
+        <div><span>Evaluators</span><strong>${summary.totalEvaluators}</strong></div>
+        <div><span>Recommendation</span><strong>${summary.recommendation}</strong></div>
+      </div>
+      <div class="evaluation-summary-actions">
+        <span class="decision-pill" data-decision="${summary.recommendation.toLowerCase()}">${summary.recommendation}</span>
+        ${summary.fastTrack ? '<span class="reference-badge">Fast-track candidate</span>' : ""}
+      </div>
+    </div>
+  `;
+}
+
 function renderOpenItems() {
   openItemsList.innerHTML = "";
 
@@ -919,6 +1110,131 @@ function renderOpenItems() {
     node.querySelector(".close-item-button").addEventListener("click", () => {
       item.status = "closed";
       refreshDerivedViews();
+    });
+
+    const evaluationSummaryHost = node.querySelector("[data-open-item-evaluation-summary]");
+    const evaluationToggleButton = node.querySelector("[data-open-item-evaluation-toggle]");
+    const evaluationPanel = node.querySelector("[data-open-item-evaluation-panel]");
+    const evaluator = getCurrentEvaluator();
+    const criteria = loadCcbDecisionCriteria();
+    let evaluationDraft = buildEvaluationDraft(item.id, evaluator.email);
+    const renderEvaluationPanel = () => {
+      const weightedScore = calculateWeightedScore(evaluationDraft);
+      const recommendation = getDecisionRecommendation(weightedScore);
+      const warnings = getEvaluationWarnings(item, evaluationDraft);
+      evaluationSummaryHost.innerHTML = renderEvaluationSummary(item);
+
+      evaluationPanel.innerHTML = `
+        <div class="evaluation-panel-shell">
+          <p class="meta-line">Score each criterion using the official CCB Decision criteria. The weighted score will drive the recommendation, but final CCB approval remains a board decision.</p>
+          <div class="evaluation-overview">
+            <div><span>Total weighted score</span><strong>${Number.isFinite(weightedScore) ? weightedScore.toFixed(2) : "Incomplete"}</strong></div>
+            <div><span>Recommendation</span><strong>${recommendation}</strong></div>
+          </div>
+          ${warnings.length ? `<div class="evaluation-warning-list">${warnings.map((warning) => `<div class="evaluation-warning">${escapeHtml(warning)}</div>`).join("")}</div>` : ""}
+          <div class="evaluation-criteria-list">
+            ${criteria.map((criterion) => {
+              const entry = evaluationDraft.find((candidate) => candidate.criterionId === criterion.id) || {};
+              return `
+                <section class="evaluation-criterion-card" data-criterion-id="${escapeHtml(criterion.id)}">
+                  <div class="evaluation-criterion-head">
+                    <div>
+                      <h4>${escapeHtml(criterion.name)}</h4>
+                      <p>${escapeHtml(criterion.note || "")}</p>
+                    </div>
+                    <span class="reference-badge">${Math.round(Number(criterion.weight || 0) * 100)}%</span>
+                  </div>
+                  <div class="evaluation-criterion-columns">
+                    <div class="evaluation-copy">
+                      <p class="field-label">Factors</p>
+                      <ul>${(criterion.factors || []).map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>
+                    </div>
+                    <div class="evaluation-copy">
+                      <p class="field-label">Scoring guide</p>
+                      <ul>${(criterion.scoringGuide || []).map((guide) => `<li>${escapeHtml(`${guide.score} = ${guide.label}`)}</li>`).join("")}</ul>
+                    </div>
+                  </div>
+                  <div class="evaluation-score-row">
+                    <label class="field-label">Score</label>
+                    <div class="evaluation-score-group">
+                      ${[1, 2, 3, 4, 5].map((score) => `
+                        <button
+                          type="button"
+                          class="evaluation-score-button${Number(entry.score) === score ? " is-active" : ""}"
+                          data-evaluation-score
+                          data-criterion-id="${escapeHtml(criterion.id)}"
+                          data-score="${score}"
+                        >${score}</button>
+                      `).join("")}
+                    </div>
+                  </div>
+                  <div class="stack">
+                    <div>
+                      <p class="field-label">Rationale</p>
+                      <textarea data-evaluation-rationale data-criterion-id="${escapeHtml(criterion.id)}" rows="3" placeholder="Required rationale">${escapeHtml(entry.rationale || "")}</textarea>
+                    </div>
+                    <div>
+                      <p class="field-label">Supporting data / reference</p>
+                      <input data-evaluation-supporting data-criterion-id="${escapeHtml(criterion.id)}" value="${escapeHtml(entry.supportingReference || "")}" placeholder="Optional supporting reference" />
+                    </div>
+                  </div>
+                </section>
+              `;
+            }).join("")}
+          </div>
+          <button type="button" data-save-evaluation>Save evaluation</button>
+        </div>
+      `;
+
+      const updateDraft = () => {
+        criteria.forEach((criterion) => {
+          const draftEntry = evaluationDraft.find((candidate) => candidate.criterionId === criterion.id);
+          const activeScoreButton = evaluationPanel.querySelector(`[data-evaluation-score][data-criterion-id="${criterion.id}"].is-active`);
+          draftEntry.score = activeScoreButton ? Number(activeScoreButton.dataset.score) : "";
+          draftEntry.rationale = evaluationPanel.querySelector(`[data-evaluation-rationale][data-criterion-id="${criterion.id}"]`)?.value.trim() || "";
+          draftEntry.supportingReference = evaluationPanel.querySelector(`[data-evaluation-supporting][data-criterion-id="${criterion.id}"]`)?.value.trim() || "";
+        });
+      };
+
+      evaluationPanel.querySelectorAll("[data-evaluation-score]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const criterionId = button.dataset.criterionId;
+          updateDraft();
+          evaluationPanel.querySelectorAll(`[data-evaluation-score][data-criterion-id="${criterionId}"]`).forEach((candidate) => candidate.classList.remove("is-active"));
+          button.classList.add("is-active");
+          updateDraft();
+          renderEvaluationPanel();
+        });
+      });
+
+      evaluationPanel.querySelector("[data-save-evaluation]")?.addEventListener("click", async () => {
+        updateDraft();
+        try {
+          const payload = await saveCcbEvaluation(item.id, evaluator, evaluationDraft);
+          Object.assign(state, payload.state);
+          renderReferencePanels();
+          renderOpenItems();
+        } catch (error) {
+          window.alert(error.message || "No se pudo guardar la evaluacion.");
+        }
+      });
+    };
+
+    evaluationSummaryHost.innerHTML = renderEvaluationSummary(item);
+    const isExpanded = expandedEvaluationPanels.has(item.id);
+    evaluationPanel.hidden = !isExpanded;
+    if (isExpanded) {
+      renderEvaluationPanel();
+    }
+    evaluationToggleButton.addEventListener("click", () => {
+      if (expandedEvaluationPanels.has(item.id)) {
+        expandedEvaluationPanels.delete(item.id);
+        evaluationPanel.hidden = true;
+        return;
+      }
+      expandedEvaluationPanels.add(item.id);
+      evaluationPanel.hidden = false;
+      renderEvaluationPanel();
     });
 
     return node;
@@ -1218,6 +1534,7 @@ async function loadState() {
   }
   const payload = await parseApiResponse(response, "No se pudo cargar el estado.");
   Object.assign(state, payload.state);
+  renderReferencePanels();
   renderPrerequisite(payload.prerequisite);
   renderAreas();
   renderOpenItems();
@@ -1386,6 +1703,7 @@ function showGoogleSheetsOAuthResultFromQuery() {
 async function applyImportedPayload(response) {
   const payload = await parseApiResponse(response, "No se pudo sincronizar la informacion.");
   Object.assign(state, payload.state);
+  renderReferencePanels();
   renderPrerequisite(payload.prerequisite);
   renderAreas();
   renderOpenItems();
@@ -1628,6 +1946,7 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
     const payload = await parseApiResponse(response, "No se pudo ejecutar la sincronizacion.");
     renderLiveSyncStatus(payload);
     Object.assign(state, payload.state);
+    renderReferencePanels();
     renderPrerequisite(payload.prerequisite);
     renderAreas();
     renderOpenItems();
