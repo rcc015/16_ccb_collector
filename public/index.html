@@ -21,22 +21,20 @@
     </section>
 
     <main id="app-shell" class="app-shell app-hidden">
-      <section class="hero hero-shell">
-        <div class="hero-copy-shell">
-          <p class="eyebrow">Change Control Board</p>
+      <header class="app-header">
+        <div class="app-header-brand">
           <h1>CCB Collector</h1>
-          <p class="hero-copy">
-            Controla open items, valida si existe cambio sustancial, identifica areas impactadas, registra votos y prepara el reporte diario para la sesion de CCB.
-          </p>
+          <p>Change Control Board</p>
         </div>
-        <div class="hero-side-shell">
-          <div id="prerequisite-card" class="status-card"></div>
-          <div class="button-row top-gap">
-            <div id="current-user" class="meta-line"></div>
-            <button id="logout-button" class="secondary">Salir</button>
-          </div>
+        <div class="app-header-status">
+          <div id="source-status-pill" class="summary-source-pill"></div>
+          <div id="prerequisite-card" class="status-pill"></div>
         </div>
-      </section>
+        <div class="app-header-user">
+          <div id="current-user" class="meta-line"></div>
+          <button id="logout-button" class="secondary">Salir</button>
+        </div>
+      </header>
 
       <section class="tab-shell">
         <nav class="tab-nav" aria-label="Secciones principales">
@@ -48,39 +46,107 @@
         </nav>
 
         <section class="tab-panel is-active" data-tab-panel="summary">
-          <section class="panel two-column">
-            <div class="panel-column">
-              <div class="section-heading">
-                <h2>Owners por area</h2>
-                <div class="button-row">
-                  <button id="update-owners-button" class="secondary">Actualizar owners</button>
-                  <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
-                  <button id="export-state" class="secondary">Exportar JSON</button>
-                </div>
+          <section class="summary-dashboard">
+            <div class="section-heading summary-dashboard-head">
+              <div>
+                <h2>Governance Overview</h2>
+                <p class="meta-line">Executive risk posture, approval blockers and operating signals for the CCB workflow.</p>
               </div>
-              <p class="meta-line">
-                Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong> y luego usa <strong>Actualizar owners</strong>.
-              </p>
               <div class="button-row">
-                <input id="employees-csv-file-input" type="file" accept=".csv,text/csv" />
-                <button id="import-employees-csv-button" class="secondary">Importar empleados CSV</button>
-                <button id="clear-employees-button" class="secondary">Limpiar empleados</button>
-              </div>
-              <div id="employees-import-status" class="source-status"></div>
-              <div id="areas-list" class="area-editor-list"></div>
-            </div>
-
-            <div class="panel-column">
-              <div class="section-heading">
-                <h2>Reporte diario</h2>
+                <button id="source-status-toggle" class="secondary">Data source</button>
+                <button id="governance-settings-toggle" class="secondary">Governance Settings</button>
                 <button id="copy-report" class="secondary">Copiar resumen</button>
               </div>
-              <div id="source-status" class="source-status"></div>
-              <div id="daily-report" class="report-box"></div>
-              <p class="meta-line">
-                La app puede trabajar con snapshot local o leer/escribir directo sobre Google Sheets si configuras service account.
-              </p>
             </div>
+
+            <div id="source-status" class="source-status" hidden></div>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <h3>Executive KPI Overview</h3>
+              </div>
+              <div id="summary-kpi-grid" class="summary-kpi-grid"></div>
+              <div id="summary-more-metrics" class="summary-more-metrics"></div>
+            </section>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <h3>Risk Governance Dashboard</h3>
+                <p class="meta-line">Current and residual risk heatmaps built from impacted areas, evaluations, votes and decision posture.</p>
+              </div>
+              <div class="risk-governance-grid">
+                <div id="summary-risk-matrices" class="summary-risk-matrices"></div>
+                <aside id="summary-risk-detail" class="summary-risk-detail"></aside>
+              </div>
+            </section>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <h3>Critical Open Items</h3>
+                <p class="meta-line">Items needing immediate review due to risk, blocked approvals, pending evaluations or compliance signals.</p>
+              </div>
+              <div id="summary-critical-items" class="summary-critical-items"></div>
+              <div id="summary-critical-actions" class="summary-critical-actions"></div>
+            </section>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <div>
+                  <h3>Trends &amp; Operational Analytics</h3>
+                  <p class="meta-line">Optional deeper metrics for CCB performance tracking.</p>
+                </div>
+                <button id="summary-trends-toggle" class="secondary">Show analytics</button>
+              </div>
+              <div id="summary-trends" class="summary-trends-grid"></div>
+            </section>
+
+            <div id="daily-report" class="report-box summary-copy-report" hidden></div>
+
+            <aside id="governance-settings-drawer" class="governance-drawer" hidden>
+              <div class="governance-drawer-backdrop" data-governance-close></div>
+              <div class="governance-drawer-panel">
+                <div class="section-heading">
+                  <div>
+                    <h3>Governance Settings</h3>
+                    <p class="meta-line">Owners, mappings and synchronization controls for the governance model.</p>
+                  </div>
+                  <button type="button" class="secondary" data-governance-close>Cerrar</button>
+                </div>
+                <div class="governance-settings-groups">
+                  <section class="governance-settings-card">
+                    <div class="section-heading">
+                      <h3>Area Owners</h3>
+                      <div class="button-row">
+                        <button id="update-owners-button" class="secondary">Actualizar owners</button>
+                        <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
+                        <button id="export-state" class="secondary">Exportar JSON</button>
+                      </div>
+                    </div>
+                    <p class="meta-line">Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong>.</p>
+                    <div class="button-row">
+                      <input id="employees-csv-file-input" type="file" accept=".csv,text/csv" />
+                      <button id="import-employees-csv-button" class="secondary">Importar empleados CSV</button>
+                      <button id="clear-employees-button" class="secondary">Limpiar empleados</button>
+                    </div>
+                    <div id="employees-import-status" class="source-status"></div>
+                    <div id="areas-list" class="area-editor-list"></div>
+                  </section>
+
+                  <section class="governance-settings-card">
+                    <div class="section-heading">
+                      <h3>Governance Configuration</h3>
+                    </div>
+                    <div class="governance-settings-links">
+                      <span class="chip">User Mapping</span>
+                      <span class="chip">Risk Matrix Configuration</span>
+                      <span class="chip">Threshold Rules</span>
+                      <span class="chip">CCB Decision Rules</span>
+                    </div>
+                    <p class="meta-line">La app sigue usando datos vivos de Open Item List, CCB Evaluations, Votes, impact mappings y pending evaluators.</p>
+                  </section>
+                </div>
+              </div>
+            </aside>
           </section>
         </section>
 
@@ -233,40 +299,25 @@
 
       <template id="open-item-template">
         <article class="open-item-card">
-          <div class="card-top">
-            <div>
+          <div class="open-item-compact-head">
+            <div class="open-item-compact-title">
               <p class="item-id"></p>
               <h3 class="item-title"></h3>
             </div>
-            <span class="badge"></span>
-          </div>
-          <p class="item-description"></p>
-          <p class="meta-line"></p>
-          <p class="impact-line"></p>
-          <div class="stack open-item-owner-editor">
-            <p class="field-label">Open item owner</p>
-            <div class="autocomplete-shell">
-              <input data-open-item-owner-input placeholder="Selecciona o corrige el assignee" autocomplete="off" />
-              <div class="autocomplete-list" data-open-item-owner-autocomplete hidden></div>
+            <div class="open-item-compact-status">
+              <span class="badge"></span>
+              <span class="decision-pill item-recommendation"></span>
             </div>
           </div>
-          <div class="vote-list"></div>
-          <form class="vote-form stack">
-            <select name="areaId"></select>
-            <select name="decision">
-              <option value="approve">Approve</option>
-              <option value="reject">Reject</option>
-              <option value="needs-info">Needs info</option>
-            </select>
-            <input name="comment" placeholder="Comentario del voto" />
-            <button type="submit">Registrar voto</button>
-          </form>
-          <div class="open-item-evaluation-summary" data-open-item-evaluation-summary></div>
-          <button class="secondary evaluation-toggle-button" type="button" data-open-item-evaluation-toggle>
-            CCB Decision Evaluation
-          </button>
-          <div class="evaluation-panel" data-open-item-evaluation-panel hidden></div>
-          <button class="secondary close-item-button" type="button">Marcar closed</button>
+          <div class="open-item-score-strip">
+            <div><span>Avg</span><strong class="item-average-score"></strong></div>
+            <div><span>Evaluators</span><strong class="item-evaluator-count"></strong></div>
+            <div><span>Pending</span><strong class="item-pending-count"></strong></div>
+            <div><span>Impacted</span><strong class="item-impacted-count"></strong></div>
+          </div>
+          <div class="open-item-chip-row item-chip-list"></div>
+          <div class="open-item-detail-tabs" data-open-item-detail-tabs></div>
+          <div class="open-item-detail-panel" data-open-item-detail-panel></div>
         </article>
       </template>
     </main>
