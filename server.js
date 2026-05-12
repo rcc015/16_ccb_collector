@@ -25,6 +25,7 @@ const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env
 const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
 const GOOGLE_OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI || "";
 const PRESESSION_EMAIL_OVERRIDE = normalizeEmail(process.env.PRESESSION_EMAIL_OVERRIDE || "");
+const ADMIN_OVERRIDE_EMAIL = "rodrigo@conceivable.life";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const SEED_FILE = path.join(DATA_DIR, "seed.json");
 const AREA_DIRECTORY_FILE = path.join(DATA_DIR, "area-directory.json");
@@ -349,6 +350,21 @@ async function persistStateStore(nextState) {
   }
 
   return persistState(nextState);
+}
+
+async function persistEvaluationStateStore(nextState) {
+  if (!isGoogleSheetsStorageEnabled()) {
+    return persistState(nextState);
+  }
+
+  const normalizedState = sanitizeState(nextState);
+  const evaluationRows = buildCcbEvaluationRows(normalizedState);
+
+  await ensureSpreadsheetSheets([CCB_DECISION_SHEET_NAME, CCB_EVALUATIONS_SHEET_NAME]);
+  await clearAndWriteSheet(CCB_EVALUATIONS_SHEET_NAME, evaluationRows);
+  await writeDecisionSheetPreservingTemplate(normalizedState);
+
+  return loadStateFromGoogleSheets();
 }
 
 function getAreaDirectory() {
@@ -995,6 +1011,10 @@ function getCurrentUser(request) {
   const cookies = parseCookies(request);
   const session = decodeSessionCookie(cookies[SESSION_COOKIE_NAME]);
   return session ? session.user : null;
+}
+
+function isAdminUser(user) {
+  return normalizeEmail(user?.email) === ADMIN_OVERRIDE_EMAIL;
 }
 
 function requiresAuth(pathname) {
@@ -2010,7 +2030,7 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluationInput) {
   item.pendingEvaluators = tracking.pendingEvaluators;
   item.lastEvaluationDate = tracking.lastEvaluationDate;
   updateOpenItemCcbDecision(openItemId, aggregatedDecision, state);
-  const nextState = await persistStateStore(state);
+  const nextState = await persistEvaluationStateStore(state);
   return {
     state: nextState,
     evaluation: normalizedEntries,
@@ -2429,8 +2449,259 @@ function buildManagedDecisionHeaders() {
   return new Set([
     "OI_ID",
     "Open Item Description",
-    ...CCB_DECISION_AGGREGATE_HEADERS,
+    "CCB Decision Strategic Alignment Avg",
+    "CCB Decision Risk Assessment Avg",
+    "CCB Decision Resource Impact Avg",
+    "CCB Decision Customer Value Avg",
+    "CCB Decision Operational Feasibility Avg",
+    "Strategic Alignment Avg",
+    "Risk Assessment Avg",
+    "Resource Impact Avg",
+    "Customer Value Avg",
+    "Operational Feasibility Avg",
+    "Strategic Alignment Score",
+    "Risk Assessment Score",
+    "Resource Impact Score",
+    "Customer Value Score",
+    "Operational Feasibility Score",
+    "CCB Decision Average Score",
+    "CCB Evaluation Avg",
+    "CCB Eval Avg",
+    "CCB Ev",
+    "Total",
+    "CCB Decision Recommendation",
+    "CCB Decision Recommend",
+    "Recommendation",
+    "Status",
+    "CCB Decision Evaluator Count",
+    "CCB Evaluator Count",
+    "CCB Ev Count",
+    "Evaluator Count",
+    "CCB Decision Evaluators",
+    "Evaluators",
+    "CCB Decision Last Updated",
+    "CCB Last Updated",
+    "Last Updated",
+    "Updated At",
   ]);
+}
+
+async function saveOpenItemVote(openItemId, user, input) {
+  const state = await loadStateStore();
+  const item = (state.openItems || []).find((candidate) => candidate.id === openItemId);
+  if (!item) {
+    throw new Error("Open item no encontrado.");
+  }
+
+  const email = normalizeEmail(user?.email);
+  if (!email) {
+    throw new Error("No encontramos el correo del usuario.");
+  }
+
+  const isAdmin = isAdminUser(user);
+  const mappedArea = String(
+    state.areas.find((area) => normalizeEmail(area.email) === email)?.id || ""
+  ).trim();
+  const selectedArea = String(input?.areaId || "").trim();
+  const effectiveArea = isAdmin ? selectedArea : mappedArea;
+
+  if (!isAdmin && !mappedArea) {
+    throw new Error("You are not assigned as an owner for a CCB area.");
+  }
+  if (!effectiveArea) {
+    throw new Error("No area selected for voting.");
+  }
+  if (!isAdmin && !(item.impactedAreaIds || []).includes(mappedArea)) {
+    throw new Error("Your area is not impacted by this Open Item.");
+  }
+
+  const decision = String(input?.decision || "").trim();
+  if (!["approve", "reject", "needs-info"].includes(decision)) {
+    throw new Error("Decision de voto invalida.");
+  }
+
+  const nextVote = {
+    areaId: effectiveArea,
+    decision,
+    comment: String(input?.comment || "").trim(),
+    voterEmail: email,
+    voterName: String(user?.name || "").trim(),
+    voterArea: effectiveArea,
+    createdAt: new Date().toISOString(),
+  };
+
+  const preservedVotes = (item.votes || []).filter((vote) => vote.areaId !== effectiveArea);
+  item.votes = [...preservedVotes, nextVote];
+  if (effectiveArea && !item.impactedAreaIds.includes(effectiveArea)) {
+    item.impactedAreaIds.push(effectiveArea);
+  }
+  const tracking = deriveOpenItemTracking(state, item);
+  item.impactedAreaIds = tracking.impactedAreaIds;
+  item.impactedAreas = tracking.impactedAreas;
+  item.impactedUsers = tracking.impactedUsers;
+  item.evaluationParticipants = tracking.evaluationParticipants;
+  item.voteParticipants = tracking.voteParticipants;
+  item.pendingEvaluators = tracking.pendingEvaluators;
+  item.lastEvaluationDate = tracking.lastEvaluationDate;
+
+  const nextState = await persistStateStore(state);
+  return {
+    state: nextState,
+    vote: nextVote,
+  };
+}
+
+function normalizeHeaderKey(header) {
+  return String(header || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findExistingDecisionHeader(headers, candidates = []) {
+  const normalizedCandidates = candidates.map((candidate) => normalizeHeaderKey(candidate)).filter(Boolean);
+  const existingHeaders = Array.isArray(headers) ? headers : [];
+  const exactMatch = existingHeaders.find((header) => normalizedCandidates.includes(normalizeHeaderKey(header)));
+  if (exactMatch) {
+    return exactMatch;
+  }
+  return existingHeaders.find((header) => {
+    const normalizedHeader = normalizeHeaderKey(header);
+    return normalizedCandidates.some((candidate) => (
+      normalizedHeader.includes(candidate) ||
+      candidate.includes(normalizedHeader)
+    ));
+  }) || "";
+}
+
+function getDecisionAggregateHeaderMap(headers = []) {
+  return {
+    strategicAlignment: findExistingDecisionHeader(headers, [
+      "CCB Decision Strategic Alignment Avg",
+      "Strategic Alignment Avg",
+      "Strategic Alignment Score",
+    ]),
+    riskAssessment: findExistingDecisionHeader(headers, [
+      "CCB Decision Risk Assessment Avg",
+      "Risk Assessment Avg",
+      "Risk Assessment Score",
+    ]),
+    resourceImpact: findExistingDecisionHeader(headers, [
+      "CCB Decision Resource Impact Avg",
+      "Resource Impact Avg",
+      "Resource Impact Score",
+    ]),
+    customerValue: findExistingDecisionHeader(headers, [
+      "CCB Decision Customer Value Avg",
+      "Customer Value Avg",
+      "Customer Value Score",
+    ]),
+    operationalFeasibility: findExistingDecisionHeader(headers, [
+      "CCB Decision Operational Feasibility Avg",
+      "Operational Feasibility Avg",
+      "Operational Feasibility Score",
+    ]),
+    total: findExistingDecisionHeader(headers, [
+      "CCB Decision Average Score",
+      "CCB Evaluation Avg",
+      "CCB Eval Avg",
+      "CCB Ev",
+      "Weighted Average Score",
+      "Average Score",
+      "Total",
+    ]),
+    recommendation: findExistingDecisionHeader(headers, [
+      "CCB Decision Recommendation",
+      "CCB Decision Recommend",
+      "Recommendation",
+      "Status",
+      "CCB Status",
+    ]),
+    evaluatorCount: findExistingDecisionHeader(headers, [
+      "CCB Decision Evaluator Count",
+      "CCB Evaluator Count",
+      "Evaluator Count",
+      "Evaluators Count",
+      "CCB Ev Count",
+    ]),
+    lastUpdated: findExistingDecisionHeader(headers, [
+      "CCB Decision Last Updated",
+      "CCB Last Updated",
+      "Last Updated",
+      "Updated At",
+    ]),
+    evaluators: findExistingDecisionHeader(headers, [
+      "CCB Decision Evaluators",
+      "CCB Evaluators",
+      "Evaluators",
+    ]),
+  };
+}
+
+function normalizeDecisionSummary(summary = {}) {
+  return {
+    averageWeightedScore: Number.isFinite(Number(summary.averageWeightedScore))
+      ? Number(summary.averageWeightedScore)
+      : null,
+    recommendation: String(summary.recommendation || "").trim() || "INCOMPLETE",
+    evaluatorCount: Number(summary.evaluatorCount || 0) || 0,
+    criterionAverages: {
+      "strategic-alignment": Number.isFinite(Number(summary.criterionAverages?.["strategic-alignment"]))
+        ? Number(summary.criterionAverages["strategic-alignment"])
+        : null,
+      "risk-assessment": Number.isFinite(Number(summary.criterionAverages?.["risk-assessment"]))
+        ? Number(summary.criterionAverages["risk-assessment"])
+        : null,
+      "resource-impact": Number.isFinite(Number(summary.criterionAverages?.["resource-impact"]))
+        ? Number(summary.criterionAverages["resource-impact"])
+        : null,
+      "customer-value": Number.isFinite(Number(summary.criterionAverages?.["customer-value"]))
+        ? Number(summary.criterionAverages["customer-value"])
+        : null,
+      "operational-feasibility": Number.isFinite(Number(summary.criterionAverages?.["operational-feasibility"]))
+        ? Number(summary.criterionAverages["operational-feasibility"])
+        : null,
+    },
+    lastUpdated: String(summary.lastUpdated || "").trim(),
+    evaluators: Array.isArray(summary.evaluators) ? summary.evaluators : [],
+  };
+}
+
+function hasMeaningfulDecisionSummary(summary = {}) {
+  const normalized = normalizeDecisionSummary(summary);
+  return (
+    (normalized.averageWeightedScore != null && normalized.averageWeightedScore > 0) ||
+    normalized.evaluatorCount > 0 ||
+    normalized.lastUpdated ||
+    normalized.evaluators.length > 0 ||
+    (normalized.recommendation && normalized.recommendation !== "INCOMPLETE") ||
+    Object.values(normalized.criterionAverages).some((value) => value != null)
+  );
+}
+
+function parseDecisionAggregateSummary(record = {}, headers = []) {
+  const headerMap = getDecisionAggregateHeaderMap(headers);
+  const parseNumeric = (value) => {
+    const parsed = Number.parseFloat(String(value || "").trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    averageWeightedScore: parseNumeric(record[headerMap.total]),
+    recommendation: String(record[headerMap.recommendation] || "").trim() || "INCOMPLETE",
+    evaluatorCount: Number.parseInt(String(record[headerMap.evaluatorCount] || "").trim(), 10) || 0,
+    criterionAverages: {
+      "strategic-alignment": parseNumeric(record[headerMap.strategicAlignment]),
+      "risk-assessment": parseNumeric(record[headerMap.riskAssessment]),
+      "resource-impact": parseNumeric(record[headerMap.resourceImpact]),
+      "customer-value": parseNumeric(record[headerMap.customerValue]),
+      "operational-feasibility": parseNumeric(record[headerMap.operationalFeasibility]),
+    },
+    lastUpdated: String(record[headerMap.lastUpdated] || "").trim(),
+    evaluators: String(record[headerMap.evaluators] || "").trim()
+      ? String(record[headerMap.evaluators] || "").split(",").map((value) => String(value || "").trim()).filter(Boolean)
+      : [],
+  };
 }
 
 function parseAreasSheetRows(values) {
@@ -2666,23 +2937,24 @@ function parseDecisionSheetRows(values) {
 }
 
 function buildDecisionSheetHeaders(existingHeaders = []) {
-  const headerSet = new Set(
-    Array.isArray(existingHeaders) && existingHeaders.length
-      ? existingHeaders
-      : CCB_DECISION_HEADERS,
-  );
-
-  CCB_DECISION_HEADERS.forEach((header) => headerSet.add(header));
-  CCB_DECISION_AGGREGATE_HEADERS.forEach((header) => headerSet.add(header));
-
-  return Array.from(headerSet);
+  if (Array.isArray(existingHeaders) && existingHeaders.length) {
+    return existingHeaders.map((header) => String(header || "").trim());
+  }
+  return [...CCB_DECISION_HEADERS];
 }
 
 function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map(), decisionHeaders = CCB_DECISION_HEADERS) {
+  const headerMap = getDecisionAggregateHeaderMap(decisionHeaders);
   const rows = state.openItems.map((item) => {
     const existingRecord = existingRowsByOpenItemId.get(item.id) || {};
     const baseRecord = {};
-    const ccbDecisionSummary = getOpenItemCcbDecisionSummary(item.id, state);
+    const ccbDecisionSummary = calculateOpenItemCcbDecisionAverages(
+      item.id,
+      state,
+      Array.isArray(state?.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+        ? state.ccbDecisionCriteria
+        : getDefaultCcbDecisionCriteria(),
+    );
 
     decisionHeaders.forEach((header) => {
       baseRecord[header] = String(existingRecord[header] || "").trim();
@@ -2690,18 +2962,41 @@ function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map(), dec
 
     baseRecord.OI_ID = item.id || "";
     baseRecord["Open Item Description"] = item.title || "";
-    baseRecord["CCB Decision Average Score"] = ccbDecisionSummary?.averageWeightedScore == null ? "" : ccbDecisionSummary.averageWeightedScore;
-    baseRecord["CCB Decision Recommendation"] = ccbDecisionSummary?.recommendation || "INCOMPLETE";
-    baseRecord["CCB Decision Evaluator Count"] = ccbDecisionSummary?.evaluatorCount || 0;
-    baseRecord["CCB Decision Strategic Alignment Avg"] = ccbDecisionSummary?.criterionAverages?.["strategic-alignment"] == null ? "" : ccbDecisionSummary.criterionAverages["strategic-alignment"];
-    baseRecord["CCB Decision Risk Assessment Avg"] = ccbDecisionSummary?.criterionAverages?.["risk-assessment"] == null ? "" : ccbDecisionSummary.criterionAverages["risk-assessment"];
-    baseRecord["CCB Decision Resource Impact Avg"] = ccbDecisionSummary?.criterionAverages?.["resource-impact"] == null ? "" : ccbDecisionSummary.criterionAverages["resource-impact"];
-    baseRecord["CCB Decision Customer Value Avg"] = ccbDecisionSummary?.criterionAverages?.["customer-value"] == null ? "" : ccbDecisionSummary.criterionAverages["customer-value"];
-    baseRecord["CCB Decision Operational Feasibility Avg"] = ccbDecisionSummary?.criterionAverages?.["operational-feasibility"] == null ? "" : ccbDecisionSummary.criterionAverages["operational-feasibility"];
-    baseRecord["CCB Decision Last Updated"] = ccbDecisionSummary?.lastUpdated ? formatMexicoCityDateTime(ccbDecisionSummary.lastUpdated) : "";
-    baseRecord["CCB Decision Evaluators"] = Array.isArray(ccbDecisionSummary?.evaluators) ? ccbDecisionSummary.evaluators.join(", ") : "";
+    if (headerMap.strategicAlignment) {
+      baseRecord[headerMap.strategicAlignment] = ccbDecisionSummary?.criterionAverages?.["strategic-alignment"] == null ? "" : ccbDecisionSummary.criterionAverages["strategic-alignment"];
+    }
+    if (headerMap.riskAssessment) {
+      baseRecord[headerMap.riskAssessment] = ccbDecisionSummary?.criterionAverages?.["risk-assessment"] == null ? "" : ccbDecisionSummary.criterionAverages["risk-assessment"];
+    }
+    if (headerMap.resourceImpact) {
+      baseRecord[headerMap.resourceImpact] = ccbDecisionSummary?.criterionAverages?.["resource-impact"] == null ? "" : ccbDecisionSummary.criterionAverages["resource-impact"];
+    }
+    if (headerMap.customerValue) {
+      baseRecord[headerMap.customerValue] = ccbDecisionSummary?.criterionAverages?.["customer-value"] == null ? "" : ccbDecisionSummary.criterionAverages["customer-value"];
+    }
+    if (headerMap.operationalFeasibility) {
+      baseRecord[headerMap.operationalFeasibility] = ccbDecisionSummary?.criterionAverages?.["operational-feasibility"] == null ? "" : ccbDecisionSummary.criterionAverages["operational-feasibility"];
+    }
+    if (headerMap.total) {
+      baseRecord[headerMap.total] = ccbDecisionSummary?.averageWeightedScore == null ? "" : ccbDecisionSummary.averageWeightedScore;
+    }
+    if (headerMap.recommendation) {
+      baseRecord[headerMap.recommendation] = ccbDecisionSummary?.recommendation || "INCOMPLETE";
+    }
+    if (headerMap.evaluatorCount) {
+      baseRecord[headerMap.evaluatorCount] = ccbDecisionSummary?.evaluatorCount || 0;
+    }
+    if (headerMap.lastUpdated) {
+      baseRecord[headerMap.lastUpdated] = ccbDecisionSummary?.lastUpdated ? formatMexicoCityDateTime(ccbDecisionSummary.lastUpdated) : "";
+    }
+    if (headerMap.evaluators) {
+      baseRecord[headerMap.evaluators] = Array.isArray(ccbDecisionSummary?.evaluators) ? ccbDecisionSummary.evaluators.join(", ") : "";
+    }
 
-    return decisionHeaders.map((header) => baseRecord[header] || "");
+    return decisionHeaders.map((header) => {
+      const value = baseRecord[header];
+      return value == null ? "" : value;
+    });
   });
 
   return [decisionHeaders, ...rows];
@@ -3581,6 +3876,7 @@ async function loadStateFromGoogleSheets() {
   const state = mapSnapshotToState(snapshot, null, effectiveAreas, votesMap, preSessionChecksMap);
   state.ccbDecisionCriteria = ccbDecisionCriteria;
   state.ccbEvaluations = ccbEvaluations;
+  const decisionSheet = decisionValues.length ? parseDecisionSheetRows(decisionValues) : { context: { headerRow: [] }, rowsByOpenItemId: new Map() };
   state.openItems.forEach((item) => {
     const tracking = deriveOpenItemTracking(state, item);
     item.impactedAreaIds = tracking.impactedAreaIds;
@@ -3590,6 +3886,27 @@ async function loadStateFromGoogleSheets() {
     item.voteParticipants = tracking.voteParticipants;
     item.pendingEvaluators = tracking.pendingEvaluators;
     item.lastEvaluationDate = tracking.lastEvaluationDate;
+    const recalculatedSummary = calculateOpenItemCcbDecisionAverages(
+      item.id,
+      state,
+      state.ccbDecisionCriteria,
+    );
+    if (recalculatedSummary.evaluatorCount > 0) {
+      updateOpenItemCcbDecision(item.id, recalculatedSummary, state);
+      return;
+    }
+    const existingDecisionRecord = decisionSheet.rowsByOpenItemId.get(item.id);
+    if (existingDecisionRecord) {
+      const summaryFromDecisionSheet = parseDecisionAggregateSummary(
+        existingDecisionRecord,
+        decisionSheet.context.headerRow,
+      );
+      const hasPersistedAggregate = hasMeaningfulDecisionSummary(summaryFromDecisionSheet);
+      if (hasPersistedAggregate) {
+        updateOpenItemCcbDecision(item.id, summaryFromDecisionSheet, state);
+        return;
+      }
+    }
     updateOpenItemCcbDecision(item.id, null, state);
   });
   state.source = {
@@ -4107,12 +4424,25 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && pathname === "/api/reset") {
+      const user = getCurrentUser(request);
+      if (!isAdminUser(user)) {
+        sendJson(response, 403, { error: "Not authorized" });
+        return;
+      }
       const nextState = await persistStateStore(createDefaultState());
       sendJson(response, 200, {
         state: nextState,
         prerequisite: derivePrerequisiteStatus(nextState),
         dailyReport: buildDailyReport(nextState),
       });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/votes/save") {
+      const body = await parseBody(request);
+      const user = getCurrentUser(request);
+      const result = await saveOpenItemVote(String(body.openItemId || "").trim(), user, body);
+      sendJson(response, 200, result);
       return;
     }
 

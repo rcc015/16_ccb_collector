@@ -15,6 +15,12 @@ const openItemForm = document.getElementById("open-item-form");
 const openItemIdInput = document.getElementById("open-item-id-input");
 const nextOpenItemHint = document.getElementById("next-open-item-hint");
 const openItemsList = document.getElementById("open-items-list");
+const openItemsToolbarFilters = document.getElementById("open-items-toolbar-filters");
+const newOpenItemDrawer = document.getElementById("new-open-item-drawer");
+const openNewItemDrawerButton = document.getElementById("open-new-item-drawer");
+const openItemDescriptionField = document.getElementById("open-item-description-field");
+const toggleOpenItemDescriptionButton = document.getElementById("toggle-open-item-description");
+const appToast = document.getElementById("app-toast");
 const dailyReport = document.getElementById("daily-report");
 const summaryKpiGrid = document.getElementById("summary-kpi-grid");
 const summaryMoreMetrics = document.getElementById("summary-more-metrics");
@@ -40,6 +46,7 @@ const currentUser = document.getElementById("current-user");
 const sourceStatus = document.getElementById("source-status");
 const employeesImportStatus = document.getElementById("employees-import-status");
 const googleSheetsUserAuthStatus = document.getElementById("google-sheets-user-auth-status");
+const headerOpenItemSearch = document.getElementById("header-open-item-search");
 const preSessionOwnerSummary = document.getElementById("presession-owner-summary");
 const preSessionPendingList = document.getElementById("presession-pending-list");
 const preSessionAnsweredList = document.getElementById("presession-answered-list");
@@ -144,19 +151,26 @@ let selectedDailyReportOpenItemId = "";
 let selectedOpenItemsImpactTab = "impacting";
 let selectedOpenItemsStatusTab = "NEW";
 let selectedOpenItemId = "";
+let openItemsSearchQuery = "";
+let openItemsSearchDebounceId = null;
+let openItemsSearchPanelOpen = false;
+let highlightedOpenItemId = "";
 let selectedSummaryKpiFilter = "all";
 let selectedSummaryRiskCell = "";
 const openItemDetailTabById = new Map();
 const evaluationCriterionTabById = new Map();
 const openItemInlineFieldState = new Set();
+const openItemEditModeById = new Map();
 const preSessionExpandedItems = new Set();
 const preSessionCommentExpandedItems = new Set();
 let summaryMoreMetricsExpanded = false;
 let summaryCriticalExpanded = false;
 let summaryTrendsExpanded = false;
 let summarySourceExpanded = false;
+let openItemDrawerDescriptionExpanded = false;
 const expandedEvaluationPanels = new Set();
 const evaluationUiState = new Map();
+const evaluationSaveStatusById = new Map();
 const deepLinkState = {
   tab: "summary",
   openItemId: "",
@@ -294,6 +308,11 @@ function setAreaOwnerSelection(areaId, contact) {
 }
 
 function renderContactAutocomplete(dropdown, query, onSelect, emptyMessage = "", options = {}) {
+  if (!String(query || "").trim()) {
+    dropdown.hidden = true;
+    dropdown.innerHTML = "";
+    return;
+  }
   const matches = getMatchingContacts(query, options);
   if (!matches.length) {
     dropdown.hidden = true;
@@ -645,6 +664,10 @@ function renderSourceStatus() {
 }
 
 function renderReferencePanels() {
+  const adminMenu = document.getElementById("open-items-admin-menu");
+  if (adminMenu) {
+    adminMenu.hidden = !isAdminOverrideUser();
+  }
   guidelineList.innerHTML = OIL_GUIDELINES.map((item) => `
     <article class="reference-card">
       <h3>${item.title}</h3>
@@ -893,9 +916,235 @@ function activateTab(tabId) {
   tabPanels.forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.tabPanel === tabId);
   });
+  closeOpenItemSearchPanel();
+  renderHeaderOpenItemSearch();
 
   if (tabId === "items") {
     updateNextOpenItemSuggestion(true);
+  }
+}
+
+function getGlobalOpenItemSearchResults() {
+  const normalizedQuery = openItemsSearchQuery.trim().toLowerCase();
+  if (normalizedQuery.length < 2) {
+    return [];
+  }
+  return state.openItems
+    .filter((item) => item.status !== "closed")
+    .filter((item) => {
+      const recommendation = getEvaluationSummary(item).recommendation || "";
+      const searchableAreas = impactedAreaNames(item);
+      const searchableText = [
+        item.id,
+        item.title,
+        item.ownerName,
+        searchableAreas,
+        recommendation,
+        item.externalStatus,
+      ].join(" ").toLowerCase();
+      return searchableText.includes(normalizedQuery);
+    })
+    .slice(0, 8);
+}
+
+function closeOpenItemSearchPanel() {
+  openItemsSearchPanelOpen = false;
+}
+
+function renderHeaderOpenItemSearch() {
+  if (!headerOpenItemSearch) {
+    return;
+  }
+  const searchResults = getGlobalOpenItemSearchResults();
+  const showSuggestionPanel = openItemsSearchPanelOpen && searchResults.length > 0;
+  headerOpenItemSearch.hidden = false;
+  headerOpenItemSearch.innerHTML = `
+    <span class="open-items-nav-label">Find ticket</span>
+    <div class="open-items-search-shell" data-open-item-search-shell>
+      <input
+        type="search"
+        id="open-items-ticket-search"
+        class="open-items-search-input"
+        placeholder="Search ticket, owner, area or status"
+        autocomplete="off"
+        value="${escapeHtml(openItemsSearchQuery)}"
+      />
+      ${openItemsSearchQuery.trim() ? `
+        <button type="button" class="open-items-search-clear" data-open-item-search-clear aria-label="Clear search">✕</button>
+      ` : ""}
+      ${showSuggestionPanel ? `
+        <div class="open-items-search-suggestions">
+          ${searchResults.map((item) => `
+            <button
+              type="button"
+              class="open-items-search-suggestion"
+              data-open-item-search-select="${escapeHtml(item.id)}"
+            >
+              <div class="open-items-search-suggestion-top">
+                <strong>${escapeHtml(item.id)}</strong>
+                <span class="decision-pill" data-decision="${escapeHtml(String((getEvaluationSummary(item).recommendation || item.externalStatus || "incomplete")).toLowerCase())}">${escapeHtml(getEvaluationSummary(item).recommendation || item.externalStatus || "INCOMPLETE")}</span>
+              </div>
+              <span>${escapeHtml(item.title)}</span>
+              <small>${escapeHtml(impactedAreaNames(item) || "No impacted areas")}</small>
+            </button>
+          `).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+
+  const searchField = headerOpenItemSearch.querySelector("#open-items-ticket-search");
+  const clearButton = headerOpenItemSearch.querySelector("[data-open-item-search-clear]");
+  const resultButtons = headerOpenItemSearch.querySelectorAll("[data-open-item-search-select]");
+
+  searchField?.addEventListener("input", (event) => {
+    const nextQuery = event.target.value || "";
+    openItemsSearchQuery = nextQuery;
+    if (nextQuery.trim().length < 2) {
+      closeOpenItemSearchPanel();
+      window.clearTimeout(openItemsSearchDebounceId);
+      const suggestions = headerOpenItemSearch.querySelector(".open-items-search-suggestions");
+      if (suggestions) {
+        suggestions.remove();
+      }
+      return;
+    }
+    window.clearTimeout(openItemsSearchDebounceId);
+    openItemsSearchDebounceId = window.setTimeout(() => {
+      openItemsSearchPanelOpen = getGlobalOpenItemSearchResults().length > 0;
+      renderHeaderOpenItemSearch();
+      const field = headerOpenItemSearch.querySelector("#open-items-ticket-search");
+      if (field) {
+        field.focus();
+        field.setSelectionRange(nextQuery.length, nextQuery.length);
+      }
+    }, 260);
+  });
+
+  searchField?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeOpenItemSearchPanel();
+      renderHeaderOpenItemSearch();
+      searchField.focus();
+    }
+  });
+
+  clearButton?.addEventListener("click", () => {
+    openItemsSearchQuery = "";
+    closeOpenItemSearchPanel();
+    renderHeaderOpenItemSearch();
+    headerOpenItemSearch.querySelector("#open-items-ticket-search")?.focus();
+  });
+
+  resultButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      handleFindTicketSelect(button.dataset.openItemSearchSelect || "");
+    });
+  });
+}
+
+function isAdminOverrideUser() {
+  return String(getCurrentEvaluator().email || "").toLowerCase() === "rodrigo@conceivable.life";
+}
+
+function getVotingPermission(item) {
+  const evaluator = getCurrentEvaluator();
+  const isAdmin = isAdminOverrideUser();
+  if (isAdmin) {
+    return {
+      canVote: true,
+      isAdmin: true,
+      areaId: "",
+      message: "",
+    };
+  }
+  if (!evaluator.area) {
+    return {
+      canVote: false,
+      isAdmin: false,
+      areaId: "",
+      message: "You are not assigned as an owner for a CCB area.",
+    };
+  }
+  if (!(item.impactedAreaIds || []).includes(evaluator.area)) {
+    return {
+      canVote: false,
+      isAdmin: false,
+      areaId: evaluator.area,
+      message: "Your area is not impacted by this Open Item.",
+    };
+  }
+  return {
+    canVote: true,
+    isAdmin: false,
+    areaId: evaluator.area,
+    message: "",
+  };
+}
+
+async function saveVote(openItemId, voteInput) {
+  const response = await fetch(apiUrl("/api/votes/save"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      openItemId,
+      ...voteInput,
+    }),
+  });
+  const payload = await parseApiResponse(response, "No se pudo guardar el voto.");
+  Object.assign(state, payload.state);
+  return payload;
+}
+
+function setOpenItemDrawerVisibility(isOpen) {
+  newOpenItemDrawer.hidden = !isOpen;
+  if (isOpen) {
+    updateNextOpenItemSuggestion(true);
+    openItemIdInput.focus();
+  }
+}
+
+function syncOpenItemDrawerDescription() {
+  const shouldShow = openItemDrawerDescriptionExpanded || Boolean(openItemDescriptionField.value.trim());
+  openItemDescriptionField.hidden = !shouldShow;
+  toggleOpenItemDescriptionButton.hidden = shouldShow;
+}
+
+function showAppToast(message) {
+  appToast.textContent = message;
+  appToast.hidden = false;
+  window.clearTimeout(showAppToast.timeoutId);
+  showAppToast.timeoutId = window.setTimeout(() => {
+    appToast.hidden = true;
+  }, 2600);
+}
+
+function notifyNotAuthorized() {
+  showAppToast("Not authorized");
+}
+
+function setGlobalBusy(isBusy) {
+  document.body.classList.toggle("app-busy", isBusy);
+  document.querySelectorAll("button").forEach((button) => {
+    if (isBusy) {
+      button.dataset.wasDisabled = button.disabled ? "true" : "false";
+      button.disabled = true;
+    } else {
+      if (button.dataset.wasDisabled !== "true") {
+        button.disabled = false;
+      }
+      delete button.dataset.wasDisabled;
+    }
+  });
+}
+
+async function withGlobalBusy(task) {
+  setGlobalBusy(true);
+  try {
+    return await task();
+  } finally {
+    await new Promise((resolve) => window.setTimeout(resolve, 900));
+    setGlobalBusy(false);
   }
 }
 
@@ -1599,14 +1848,15 @@ function renderEvaluationSummary(openItem) {
   return `
     <div class="evaluation-summary evaluation-summary--compact">
       <div class="evaluation-score-stack">
-        <strong>${summary.recommendation}</strong>
-        <span>${averageScoreLabel} avg</span>
+        <strong>${averageScoreLabel}</strong>
+        <span>avg score</span>
         <span>${summary.totalEvaluators} evaluator${summary.totalEvaluators === 1 ? "" : "s"}</span>
         <span>${completion}% complete</span>
       </div>
       <div class="evaluation-summary-grid evaluation-summary-grid--compact">
         <div><span>My score</span><strong>${currentUserScoreLabel}</strong></div>
         <div><span>Average</span><strong>${averageScoreLabel}</strong></div>
+        <div><span>Recommendation</span><strong>${summary.recommendation}</strong></div>
         <div><span>Updated</span><strong>${summary.lastUpdated ? formatDateTime(summary.lastUpdated) : "N/A"}</strong></div>
       </div>
       <div class="evaluation-summary-actions evaluation-summary-actions--compact">
@@ -1629,6 +1879,37 @@ function getEvaluationCriterionTab(openItemId) {
 
 function getInlineFieldKey(openItemId, criterionId, field) {
   return `${openItemId}:${criterionId}:${field}`;
+}
+
+function getOpenItemEditMode(openItemId) {
+  return openItemEditModeById.get(openItemId) || "";
+}
+
+function handleFindTicketSelect(openItemId) {
+  const targetItem = state.openItems.find((item) => item.id === openItemId);
+  if (!targetItem) {
+    return;
+  }
+  activateTab("items");
+  selectedOpenItemsImpactTab = isPrivilegedOpenItemsViewer()
+    ? "all"
+    : (getOpenItemImpactContext(targetItem).impactingMe ? "impacting" : "not-impacting");
+  selectedOpenItemsStatusTab = String(targetItem.externalStatus || "NEW").trim().toUpperCase() || "NEW";
+  selectedOpenItemId = targetItem.id;
+  closeOpenItemSearchPanel();
+  highlightedOpenItemId = targetItem.id;
+  renderHeaderOpenItemSearch();
+  renderOpenItems();
+  window.requestAnimationFrame(() => {
+    const target = document.getElementById(`open-item-detail-${targetItem.id}`);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    window.setTimeout(() => {
+      highlightedOpenItemId = "";
+      renderOpenItems();
+    }, 1800);
+  });
 }
 
 function getOpenItemActivityModel(item) {
@@ -1664,6 +1945,7 @@ function getOpenItemActivityModel(item) {
 
 function renderOpenItems() {
   openItemsList.innerHTML = "";
+  renderHeaderOpenItemSearch();
 
   const allActiveItems = state.openItems
     .filter((item) => item.status !== "closed")
@@ -1704,44 +1986,100 @@ function renderOpenItems() {
   }
 
   const selectedStatusItems = groupedItems[selectedOpenItemsStatusTab] || [];
+  const normalizedTicketSearch = openItemsSearchQuery.trim().toLowerCase();
+  const matchesTicketSearch = (item) => {
+    if (!normalizedTicketSearch) {
+      return true;
+    }
+    const recommendation = getEvaluationSummary(item).recommendation || "";
+    const searchableAreas = impactedAreaNames(item);
+    const searchableText = [
+      item.id,
+      item.title,
+      item.ownerName,
+      searchableAreas,
+      recommendation,
+      item.externalStatus,
+    ].join(" ").toLowerCase();
+    return searchableText.includes(normalizedTicketSearch);
+  };
+  const visibleStatusItems = normalizedTicketSearch
+    ? selectedStatusItems.filter(matchesTicketSearch)
+    : selectedStatusItems;
   if (selectedStatusItems.length && !selectedStatusItems.some((item) => item.id === selectedOpenItemId)) {
     selectedOpenItemId = selectedStatusItems[0].id;
   }
   if (!selectedStatusItems.length) {
     selectedOpenItemId = "";
   }
+  if (visibleStatusItems.length && !visibleStatusItems.some((item) => item.id === selectedOpenItemId)) {
+    selectedOpenItemId = visibleStatusItems[0].id;
+  }
 
-  const selectedItem = selectedStatusItems.find((item) => item.id === selectedOpenItemId) || selectedStatusItems[0] || null;
-
+  const selectedItem = visibleStatusItems.find((item) => item.id === selectedOpenItemId) || visibleStatusItems[0] || null;
+  openItemsToolbarFilters.innerHTML = `
+    <div class="open-items-nav-group">
+      <span class="open-items-nav-label">Scope</span>
+      <div class="open-items-impact-tabs" role="tablist" aria-label="Impact filter">
+        ${impactTabs.map((tab) => `
+          <button
+            type="button"
+            class="open-items-impact-tab${selectedOpenItemsImpactTab === tab.id ? " is-active" : ""}"
+            data-open-items-impact-tab="${escapeHtml(tab.id)}"
+          >
+            <span>${escapeHtml(tab.label)}</span>
+            <strong>${tab.items.length}</strong>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+    <div class="open-items-nav-group">
+      <span class="open-items-nav-label">Status</span>
+      <div class="open-items-status-tabs" role="tablist" aria-label="Estados de open items">
+        ${availableStatusTabs.map(([status, items]) => `
+          <button
+            type="button"
+            class="open-items-status-tab${selectedOpenItemsStatusTab === status ? " is-active" : ""}"
+            data-open-items-status-tab="${escapeHtml(status)}"
+          >
+            <span>${escapeHtml(status)}</span>
+            <strong>${items.length}</strong>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
   const renderOpenItemCard = (item) => {
     const node = openItemTemplate.content.firstElementChild.cloneNode(true);
+    node.id = `open-item-detail-${item.id}`;
+    node.classList.toggle("open-item-card--highlight", highlightedOpenItemId === item.id);
     const impactContext = getOpenItemImpactContext(item);
     const evaluationSummary = getEvaluationSummary(item);
-    const detailTab = getOpenItemDetailTab(item.id);
     const pendingAreas = getOpenItemPendingAreas(item);
     const activityEntries = getOpenItemActivityModel(item);
     node.classList.toggle("open-item-card--impacting", impactContext.impactingMe);
     node.querySelector(".item-id").textContent = item.id;
     node.querySelector(".item-title").textContent = item.title;
-    node.querySelector(".badge").textContent = item.isSubstantial ? "SUBSTANTIAL" : (item.externalStatus || item.status || "OPEN");
-    const recommendationPill = node.querySelector(".item-recommendation");
-    recommendationPill.textContent = evaluationSummary.recommendation;
-    recommendationPill.dataset.decision = String(evaluationSummary.recommendation || "").toLowerCase();
+    const statusRow = node.querySelector(".open-item-compact-status");
+    statusRow.innerHTML = [
+      item.isSubstantial ? '<span class="badge">SUBSTANTIAL</span>' : "",
+      `<span class="decision-pill" data-decision="${escapeHtml(String(evaluationSummary.recommendation || "").toLowerCase())}">${escapeHtml(evaluationSummary.recommendation)}</span>`,
+      (item.impactedAreaIds || []).length ? `<span class="chip">${escapeHtml(impactedAreaNames(item))}</span>` : "",
+      pendingAreas.length ? `<span class="chip">Pending: ${escapeHtml(pendingAreas.join(", "))}</span>` : "",
+      impactContext.pendingEvaluation ? '<span class="reference-badge">Pending evaluation</span>' : "",
+      impactContext.voteSubmitted ? '<span class="reference-badge">Vote submitted</span>' : "",
+      impactContext.evaluationComplete ? '<span class="reference-badge">Evaluation completed</span>' : "",
+    ].filter(Boolean).join("");
     node.querySelector(".item-average-score").textContent = Number.isFinite(evaluationSummary.averageScore) ? evaluationSummary.averageScore.toFixed(2) : "N/A";
     node.querySelector(".item-evaluator-count").textContent = String(evaluationSummary.totalEvaluators || 0);
     node.querySelector(".item-pending-count").textContent = String(pendingAreas.length);
     node.querySelector(".item-impacted-count").textContent = String((item.impactedAreaIds || []).length);
-    node.querySelector(".item-chip-list").innerHTML = [
-      ...(item.impactedAreaIds || []).length ? [`<span class="chip">${escapeHtml(impactedAreaNames(item))}</span>`] : [],
-      pendingAreas.length ? [`<span class="chip">Pending: ${escapeHtml(pendingAreas.join(", "))}</span>`] : [],
-      impactContext.pendingEvaluation ? ['<span class="reference-badge">Pending evaluation</span>'] : [],
-      impactContext.voteSubmitted ? ['<span class="reference-badge">Vote submitted</span>'] : [],
-      impactContext.evaluationComplete ? ['<span class="reference-badge">Evaluation completed</span>'] : [],
-    ].join("");
     const tabsHost = node.querySelector("[data-open-item-detail-tabs]");
     const detailPanel = node.querySelector("[data-open-item-detail-panel]");
     let lastCommittedOwner = item.ownerName || "";
     let lastCommittedOwnerEmail = item.ownerEmail || "";
+    let lastCommittedTitle = item.title || "";
+    let lastCommittedDescription = item.description || "";
     const applyOpenItemOwnerSelection = async (selectedContact) => {
       const nextOwner = (selectedContact?.name || selectedContact?.email || "").trim();
       const nextOwnerEmail = (selectedContact?.email || "").trim().toLowerCase();
@@ -1769,6 +2107,48 @@ function renderOpenItems() {
       }
     };
 
+    const saveInlineOpenItemField = async (field, nextValue, options = {}) => {
+      const previousValue = field === "title" ? lastCommittedTitle : field === "description" ? lastCommittedDescription : lastCommittedOwner;
+      const previousEmail = lastCommittedOwnerEmail;
+      if (field === "title") {
+        item.title = nextValue.trim();
+      } else if (field === "description") {
+        item.description = nextValue.trim();
+      } else if (field === "owner") {
+        item.ownerName = nextValue.trim();
+        if (!options.keepEmail) {
+          item.ownerEmail = "";
+        }
+      }
+
+      try {
+        await saveStateSilently();
+        if (field === "title") {
+          lastCommittedTitle = item.title;
+        } else if (field === "description") {
+          lastCommittedDescription = item.description;
+        } else if (field === "owner") {
+          lastCommittedOwner = item.ownerName;
+          lastCommittedOwnerEmail = item.ownerEmail || "";
+        }
+        openItemEditModeById.delete(item.id);
+        renderOpenItems();
+        showAppToast("Open Item updated");
+      } catch (error) {
+        if (field === "title") {
+          item.title = previousValue;
+        } else if (field === "description") {
+          item.description = previousValue;
+        } else if (field === "owner") {
+          item.ownerName = previousValue;
+          item.ownerEmail = previousEmail;
+        }
+        openItemEditModeById.delete(item.id);
+        renderOpenItems();
+        window.alert(error.message || "No se pudo actualizar el Open Item.");
+      }
+    };
+
     const evaluator = getCurrentEvaluator();
     const criteria = loadCcbDecisionCriteria();
     let evaluationDraft = buildEvaluationDraft(item.id, evaluator.email);
@@ -1776,6 +2156,7 @@ function renderOpenItems() {
     const validationState = evaluationUiState.get(uiKey) || { touched: {}, attemptedSave: false };
     evaluationUiState.set(uiKey, validationState);
     const renderEvaluationPanel = () => {
+      const saveStatus = evaluationSaveStatusById.get(item.id) || "";
       const weightedScore = calculateWeightedScore(evaluationDraft);
       const recommendation = getDecisionRecommendation(weightedScore);
       const warnings = getEvaluationWarnings(item, evaluationDraft);
@@ -1797,6 +2178,9 @@ function renderOpenItems() {
             <div class="evaluation-summary-actions">
               ${impactContext.pendingEvaluation ? '<span class="reference-badge">Pending evaluation</span>' : ""}
               ${impactContext.evaluationComplete ? '<span class="reference-badge">Completed</span>' : ""}
+              ${saveStatus ? `<span class="evaluation-save-status">${escapeHtml(saveStatus)}</span>` : ""}
+              <button type="button" class="icon-affirm" data-save-evaluation aria-label="Save evaluation">✓</button>
+              <button type="button" class="icon-dismiss" data-cancel-evaluation aria-label="Cancel changes">✕</button>
             </div>
           </div>
           ${visibleWarnings.length ? `<div class="evaluation-warning-list">${visibleWarnings.map((warning) => `<div class="evaluation-warning">${escapeHtml(warning)}</div>`).join("")}</div>` : ""}
@@ -1812,7 +2196,8 @@ function renderOpenItems() {
               const scoreTouched = Boolean(validationState.touched[`${criterion.id}:score`]);
               const showRationaleError = (validationState.attemptedSave || rationaleTouched) && !String(entry.rationale || "").trim();
               const showScoreError = (validationState.attemptedSave || scoreTouched) && !Number.isInteger(Number(entry.score));
-              const showRationale = openItemInlineFieldState.has(getInlineFieldKey(item.id, criterion.id, "rationale")) || Boolean(entry.rationale);
+              const rationaleKey = getInlineFieldKey(item.id, criterion.id, "rationale");
+              const showRationale = openItemInlineFieldState.has(rationaleKey) || Boolean(entry.rationale) || Number.isInteger(Number(entry.score)) || showRationaleError;
               const showSupporting = openItemInlineFieldState.has(getInlineFieldKey(item.id, criterion.id, "supporting")) || Boolean(entry.supportingReference);
               return `
                 <section class="evaluation-criterion-card" data-criterion-id="${escapeHtml(criterion.id)}">
@@ -1868,22 +2253,32 @@ function renderOpenItems() {
               `;
             }).join("")}
           </div>
-          <button type="button" data-save-evaluation>Save evaluation</button>
         </div>
       `;
 
       const updateDraft = () => {
-        criteria.forEach((criterion) => {
-          const draftEntry = evaluationDraft.find((candidate) => candidate.criterionId === criterion.id);
-          const activeScoreButton = detailPanel.querySelector(`[data-evaluation-score][data-criterion-id="${criterion.id}"].is-active`);
-          draftEntry.score = activeScoreButton ? Number(activeScoreButton.dataset.score) : "";
-          draftEntry.rationale = detailPanel.querySelector(`[data-evaluation-rationale][data-criterion-id="${criterion.id}"]`)?.value.trim() || "";
-          draftEntry.supportingReference = detailPanel.querySelector(`[data-evaluation-supporting][data-criterion-id="${criterion.id}"]`)?.value.trim() || "";
-        });
+        const visibleCriterionId = getEvaluationCriterionTab(item.id);
+        const draftEntry = evaluationDraft.find((candidate) => candidate.criterionId === visibleCriterionId);
+        if (!draftEntry) {
+          return;
+        }
+        const activeScoreButton = detailPanel.querySelector(`[data-evaluation-score][data-criterion-id="${visibleCriterionId}"].is-active`);
+        if (activeScoreButton) {
+          draftEntry.score = Number(activeScoreButton.dataset.score);
+        }
+        const rationaleField = detailPanel.querySelector(`[data-evaluation-rationale][data-criterion-id="${visibleCriterionId}"]`);
+        if (rationaleField) {
+          draftEntry.rationale = rationaleField.value.trim();
+        }
+        const supportingField = detailPanel.querySelector(`[data-evaluation-supporting][data-criterion-id="${visibleCriterionId}"]`);
+        if (supportingField) {
+          draftEntry.supportingReference = supportingField.value.trim();
+        }
       };
 
       detailPanel.querySelectorAll("[data-evaluation-criterion-tab]").forEach((button) => {
         button.addEventListener("click", () => {
+          updateDraft();
           evaluationCriterionTabById.set(item.id, button.dataset.evaluationCriterionTab || "strategic-alignment");
           renderEvaluationPanel();
         });
@@ -1900,11 +2295,16 @@ function renderOpenItems() {
         button.addEventListener("click", () => {
           const criterionId = button.dataset.criterionId;
           validationState.touched[`${criterionId}:score`] = true;
+          evaluationSaveStatusById.delete(item.id);
+          openItemInlineFieldState.add(getInlineFieldKey(item.id, criterionId, "rationale"));
           updateDraft();
           detailPanel.querySelectorAll(`[data-evaluation-score][data-criterion-id="${criterionId}"]`).forEach((candidate) => candidate.classList.remove("is-active"));
           button.classList.add("is-active");
           updateDraft();
           renderEvaluationPanel();
+          window.requestAnimationFrame(() => {
+            detailPanel.querySelector(`[data-evaluation-rationale][data-criterion-id="${criterionId}"]`)?.focus();
+          });
         });
       });
 
@@ -1915,12 +2315,14 @@ function renderOpenItems() {
           renderEvaluationPanel();
         });
         field.addEventListener("input", () => {
+          evaluationSaveStatusById.delete(item.id);
           updateDraft();
         });
       });
 
       detailPanel.querySelectorAll("[data-evaluation-supporting]").forEach((field) => {
         field.addEventListener("input", () => {
+          evaluationSaveStatusById.delete(item.id);
           updateDraft();
         });
       });
@@ -1932,20 +2334,47 @@ function renderOpenItems() {
           warning.startsWith("Please select a score") || warning.startsWith("Please provide a decision justification")
         ));
         if (blockingWarnings.length) {
+          const firstMissingCriterion = criteria.find((criterion) => {
+            const entry = evaluationDraft.find((candidate) => candidate.criterionId === criterion.id) || {};
+            return !Number.isInteger(Number(entry.score)) || !String(entry.rationale || "").trim();
+          });
+          if (firstMissingCriterion) {
+            evaluationCriterionTabById.set(item.id, firstMissingCriterion.criterionId);
+            openItemInlineFieldState.add(getInlineFieldKey(item.id, firstMissingCriterion.criterionId, "rationale"));
+          }
           renderEvaluationPanel();
+          window.requestAnimationFrame(() => {
+            const targetField = detailPanel.querySelector(`[data-evaluation-rationale][data-criterion-id="${firstMissingCriterion?.criterionId || ""}"]`);
+            if (targetField) {
+              targetField.scrollIntoView({ behavior: "smooth", block: "center" });
+              targetField.focus();
+            }
+          });
           return;
         }
         try {
-          if (evaluator.area && !item.impactedAreaIds.includes(evaluator.area)) {
-            item.impactedAreaIds.push(evaluator.area);
-          }
-          const payload = await saveCcbEvaluation(item.id, evaluator, evaluationDraft);
-          Object.assign(state, payload.state);
+          await withGlobalBusy(async () => {
+            if (evaluator.area && !item.impactedAreaIds.includes(evaluator.area)) {
+              item.impactedAreaIds.push(evaluator.area);
+            }
+            const payload = await saveCcbEvaluation(item.id, evaluator, evaluationDraft);
+            Object.assign(state, payload.state);
+          });
+          validationState.attemptedSave = false;
+          evaluationSaveStatusById.set(item.id, "Dato actualizado");
           renderReferencePanels();
           renderOpenItems();
+          showAppToast("Dato actualizado");
         } catch (error) {
           window.alert(error.message || "No se pudo guardar la evaluacion.");
         }
+      });
+
+      detailPanel.querySelector("[data-cancel-evaluation]")?.addEventListener("click", () => {
+        evaluationDraft = buildEvaluationDraft(item.id, evaluator.email);
+        validationState.attemptedSave = false;
+        evaluationSaveStatusById.delete(item.id);
+        renderEvaluationPanel();
       });
     };
 
@@ -1954,6 +2383,7 @@ function renderOpenItems() {
       const compactOwnerSummary = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
       const recommendationLabel = evaluationSummary.recommendation;
       const averageScoreLabel = Number.isFinite(evaluationSummary.averageScore) ? evaluationSummary.averageScore.toFixed(2) : "N/A";
+      const editMode = getOpenItemEditMode(item.id);
       tabsHost.innerHTML = ["overview", "votes", "evaluation", "risk", "activity"].map((tab) => `
         <button type="button" class="open-item-detail-tab${currentTab === tab ? " is-active" : ""}" data-open-item-detail-tab="${tab}">
           ${tab === "overview" ? "Overview" : tab === "votes" ? "Votes" : tab === "evaluation" ? "CCB Evaluation" : tab === "risk" ? "Risk" : "Activity"}
@@ -1961,14 +2391,53 @@ function renderOpenItems() {
       `).join("");
 
       if (currentTab === "overview") {
+        const isEditingTitle = editMode === "title";
+        const isEditingDescription = editMode === "description";
+        const isEditingOwner = editMode === "owner";
+        node.querySelector(".open-item-compact-title").innerHTML = `
+          <p class="item-id">${escapeHtml(item.id)}</p>
+          ${
+            isEditingTitle
+              ? `
+                <div class="inline-edit-shell inline-edit-shell--title">
+                  <input class="inline-edit-input" data-open-item-title-input value="${escapeHtml(item.title || "")}" />
+                  <div class="inline-edit-actions">
+                    <button type="button" class="icon-affirm" data-open-item-title-save aria-label="Save title">✓</button>
+                    <button type="button" class="icon-dismiss" data-open-item-title-cancel aria-label="Cancel title">✕</button>
+                  </div>
+                </div>
+              `
+              : `
+                <div class="inline-display-row">
+                  <h3 class="item-title">${escapeHtml(item.title)}</h3>
+                  <button type="button" class="icon-edit-button" data-open-item-edit="title" aria-label="Edit title">✎</button>
+                </div>
+              `
+          }
+        `;
         detailPanel.innerHTML = `
           <div class="open-item-pane-grid open-item-pane-grid--overview">
             <div class="open-item-pane-block">
               <p class="field-label">Owner</p>
-              <div class="autocomplete-shell">
-                <input data-open-item-owner-input placeholder="Selecciona o corrige el assignee" autocomplete="off" value="${escapeHtml(item.ownerName || "")}" />
-                <div class="autocomplete-list" data-open-item-owner-autocomplete hidden></div>
-              </div>
+              ${
+                isEditingOwner
+                  ? `
+                    <div class="autocomplete-shell inline-edit-shell inline-edit-shell--field">
+                      <input data-open-item-owner-input class="inline-edit-input" placeholder="Search owner" autocomplete="off" value="${escapeHtml(item.ownerName || "")}" />
+                      <div class="inline-edit-actions">
+                        <button type="button" class="icon-affirm" data-open-item-owner-save aria-label="Save owner">✓</button>
+                        <button type="button" class="icon-dismiss" data-open-item-owner-cancel aria-label="Cancel owner">✕</button>
+                      </div>
+                      <div class="autocomplete-list" data-open-item-owner-autocomplete hidden></div>
+                    </div>
+                  `
+                  : `
+                    <div class="inline-display-row">
+                      <strong class="inline-display-value">${escapeHtml(item.ownerName || "Unassigned")}</strong>
+                      <button type="button" class="icon-edit-button" data-open-item-edit="owner" aria-label="Edit owner">✎</button>
+                    </div>
+                  `
+              }
               <p class="meta-line" data-open-item-owner-summary>${escapeHtml(compactOwnerSummary)}</p>
             </div>
             <div class="open-item-pane-block">
@@ -1981,8 +2450,23 @@ function renderOpenItems() {
               </div>
             </div>
             <div class="open-item-pane-block open-item-pane-block--wide">
-              <p class="field-label">Description</p>
-              <p class="meta-line">${escapeHtml(item.description || "Sin descripcion")}</p>
+              <div class="inline-display-row">
+                <p class="field-label">Description</p>
+                ${isEditingDescription ? "" : '<button type="button" class="icon-edit-button" data-open-item-edit="description" aria-label="Edit description">✎</button>'}
+              </div>
+              ${
+                isEditingDescription
+                  ? `
+                    <div class="inline-edit-shell inline-edit-shell--stack">
+                      <textarea class="inline-edit-textarea" data-open-item-description-input rows="4" placeholder="Description">${escapeHtml(item.description || "")}</textarea>
+                      <div class="inline-edit-actions">
+                        <button type="button" class="icon-affirm" data-open-item-description-save aria-label="Save description">✓</button>
+                        <button type="button" class="icon-dismiss" data-open-item-description-cancel aria-label="Cancel description">✕</button>
+                      </div>
+                    </div>
+                  `
+                  : `<p class="meta-line">${escapeHtml(item.description || "No description provided.")}</p>`
+              }
             </div>
             <div class="open-item-pane-block open-item-pane-block--wide">
               ${renderEvaluationSummary(item)}
@@ -1990,47 +2474,55 @@ function renderOpenItems() {
           </div>
         `;
       } else if (currentTab === "votes") {
+        const votingPermission = getVotingPermission(item);
         detailPanel.innerHTML = `
           <div class="open-item-pane-stack">
             <div class="vote-list">${renderVotes(item.votes)}</div>
             <form class="vote-form open-item-inline-form">
-              <select name="areaId"></select>
+              ${
+                votingPermission.isAdmin
+                  ? '<select name="areaId"></select>'
+                  : `<div class="vote-area-readonly"><span class="field-label">Voting as</span><span class="chip">${escapeHtml(votingPermission.areaId ? ownerAreaName(votingPermission.areaId) : "No area")}</span></div>`
+              }
               <select name="decision">
                 <option value="approve">Approve</option>
                 <option value="reject">Reject</option>
                 <option value="needs-info">Needs info</option>
               </select>
               <input name="comment" placeholder="Comentario del voto" />
-              <button type="submit">Submit vote</button>
+              <button type="submit"${votingPermission.canVote ? "" : " disabled"}>Submit vote</button>
             </form>
+            ${votingPermission.message ? `<p class="meta-line">${escapeHtml(votingPermission.message)}</p>` : ""}
           </div>
         `;
         const voteAreaSelect = detailPanel.querySelector("select[name=\"areaId\"]");
-        state.areas.forEach((area) => {
-          const option = document.createElement("option");
-          option.value = area.id;
-          option.textContent = area.name;
-          voteAreaSelect.appendChild(option);
-        });
+        if (voteAreaSelect) {
+          state.areas.forEach((area) => {
+            const option = document.createElement("option");
+            option.value = area.id;
+            option.textContent = area.name;
+            voteAreaSelect.appendChild(option);
+          });
+          voteAreaSelect.value = votingPermission.areaId || voteAreaSelect.value;
+        }
         detailPanel.querySelector(".vote-form").addEventListener("submit", async (event) => {
           event.preventDefault();
-          const formData = new FormData(event.currentTarget);
-          const evaluatorForVote = getCurrentEvaluator();
-          item.votes.push({
-            areaId: formData.get("areaId"),
-            decision: formData.get("decision"),
-            comment: String(formData.get("comment") || "").trim(),
-            voterEmail: evaluatorForVote.email,
-            voterName: evaluatorForVote.name,
-            voterArea: evaluatorForVote.area,
-            createdAt: new Date().toISOString(),
-          });
-          if (evaluatorForVote.area && !item.impactedAreaIds.includes(evaluatorForVote.area)) {
-            item.impactedAreaIds.push(evaluatorForVote.area);
+          if (!votingPermission.canVote) {
+            window.alert(votingPermission.message || "Not authorized");
+            return;
           }
-          refreshDerivedViews();
+          const formData = new FormData(event.currentTarget);
           try {
-            await saveStateSilently();
+            await withGlobalBusy(async () => {
+              await saveVote(item.id, {
+                areaId: votingPermission.isAdmin ? formData.get("areaId") : votingPermission.areaId,
+                decision: formData.get("decision"),
+                comment: String(formData.get("comment") || "").trim(),
+              });
+            });
+            renderReferencePanels();
+            renderOpenItems();
+            showAppToast("Dato actualizado");
           } catch (error) {
             window.alert(error.message || "No se pudo guardar el voto.");
           }
@@ -2092,48 +2584,119 @@ function renderOpenItems() {
       });
 
       if (currentTab === "overview") {
+        node.querySelectorAll("[data-open-item-edit]").forEach((button) => {
+          button.addEventListener("click", () => {
+            openItemEditModeById.set(item.id, button.dataset.openItemEdit || "");
+            renderDetailPanel();
+          });
+        });
+
+        detailPanel.querySelector("[data-open-item-description-save]")?.addEventListener("click", async () => {
+          const value = detailPanel.querySelector("[data-open-item-description-input]")?.value || "";
+          await saveInlineOpenItemField("description", value);
+        });
+        detailPanel.querySelector("[data-open-item-description-cancel]")?.addEventListener("click", () => {
+          item.description = lastCommittedDescription;
+          openItemEditModeById.delete(item.id);
+          renderDetailPanel();
+        });
+        detailPanel.querySelector("[data-open-item-title-save]")?.addEventListener("click", async () => {
+          const value = node.querySelector("[data-open-item-title-input]")?.value || "";
+          if (!String(value).trim()) {
+            return;
+          }
+          await saveInlineOpenItemField("title", value);
+        });
+        node.querySelector("[data-open-item-title-cancel]")?.addEventListener("click", () => {
+          item.title = lastCommittedTitle;
+          openItemEditModeById.delete(item.id);
+          renderOpenItems();
+        });
+        node.querySelector("[data-open-item-title-input]")?.addEventListener("keydown", async (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            const value = event.currentTarget.value || "";
+            if (!String(value).trim()) {
+              return;
+            }
+            await saveInlineOpenItemField("title", value);
+          }
+          if (event.key === "Escape") {
+            item.title = lastCommittedTitle;
+            openItemEditModeById.delete(item.id);
+            renderOpenItems();
+          }
+        });
+
         const overviewOwnerInput = detailPanel.querySelector("[data-open-item-owner-input]");
         const overviewOwnerDropdown = detailPanel.querySelector("[data-open-item-owner-autocomplete]");
-        overviewOwnerInput.addEventListener("input", (event) => {
-          item.ownerName = event.currentTarget.value.trim();
-          item.ownerEmail = "";
-          const summaryLine = detailPanel.querySelector("[data-open-item-owner-summary]");
-          if (summaryLine) {
-            summaryLine.textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
-          }
-          renderContactAutocomplete(
-            overviewOwnerDropdown,
-            item.ownerName,
-            applyOpenItemOwnerSelection,
-            "Sin coincidencias en el directorio de empleados.",
-            { requireEmail: true },
-          );
-        });
-        overviewOwnerInput.addEventListener("focus", (event) => {
-          renderContactAutocomplete(
-            overviewOwnerDropdown,
-            event.currentTarget.value,
-            applyOpenItemOwnerSelection,
-            "Sin coincidencias en el directorio de empleados.",
-            { requireEmail: true },
-          );
-        });
-        overviewOwnerInput.addEventListener("blur", () => {
-          const exactContact = findContactByName(overviewOwnerInput.value) || findContactByEmail(overviewOwnerInput.value);
-          if (exactContact?.email) {
-            applyOpenItemOwnerSelection(exactContact);
-          } else {
-            item.ownerName = lastCommittedOwner;
-            item.ownerEmail = lastCommittedOwnerEmail;
-            overviewOwnerInput.value = lastCommittedOwner;
+        if (overviewOwnerInput && overviewOwnerDropdown) {
+          overviewOwnerInput.addEventListener("input", (event) => {
+            const query = event.currentTarget.value.trim();
+            item.ownerName = query;
+            item.ownerEmail = "";
             const summaryLine = detailPanel.querySelector("[data-open-item-owner-summary]");
             if (summaryLine) {
               summaryLine.textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
             }
+            if (!query) {
+              overviewOwnerDropdown.hidden = true;
+              overviewOwnerDropdown.innerHTML = "";
+              return;
+            }
+            renderContactAutocomplete(
+              overviewOwnerDropdown,
+              query,
+              (selectedContact) => {
+                overviewOwnerInput.value = selectedContact?.name || selectedContact?.email || "";
+                item.ownerName = overviewOwnerInput.value;
+                item.ownerEmail = selectedContact?.email || "";
+                const ownerSummary = detailPanel.querySelector("[data-open-item-owner-summary]");
+                if (ownerSummary) {
+                  ownerSummary.textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
+                }
+              },
+              "Sin coincidencias en el directorio de empleados.",
+              { requireEmail: true },
+            );
+          });
+          overviewOwnerInput.addEventListener("blur", () => {
+            window.setTimeout(() => {
+              overviewOwnerDropdown.hidden = true;
+            }, 120);
+          });
+          detailPanel.querySelector("[data-open-item-owner-save]")?.addEventListener("click", async () => {
+            const query = overviewOwnerInput.value.trim();
+            const exactContact = findContactByName(query) || findContactByEmail(query);
+            if (exactContact?.email) {
+              item.ownerName = exactContact.name || exactContact.email;
+              item.ownerEmail = exactContact.email;
+              await saveInlineOpenItemField("owner", item.ownerName, { keepEmail: true });
+              return;
+            }
+            if (query) {
+              item.ownerName = query;
+              await saveInlineOpenItemField("owner", query, { keepEmail: true });
+            }
+          });
+          detailPanel.querySelector("[data-open-item-owner-cancel]")?.addEventListener("click", () => {
+            item.ownerName = lastCommittedOwner;
+            item.ownerEmail = lastCommittedOwnerEmail;
+            openItemEditModeById.delete(item.id);
+            renderDetailPanel();
+          });
+        }
+
+        detailPanel.querySelector("[data-open-item-description-input]")?.addEventListener("keydown", async (event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            await saveInlineOpenItemField("description", event.currentTarget.value || "");
           }
-          window.setTimeout(() => {
-            overviewOwnerDropdown.hidden = true;
-          }, 120);
+          if (event.key === "Escape") {
+            item.description = lastCommittedDescription;
+            openItemEditModeById.delete(item.id);
+            renderDetailPanel();
+          }
         });
       }
     };
@@ -2150,47 +2713,26 @@ function renderOpenItems() {
 
   openItemsList.innerHTML = `
     <div class="open-items-shell">
-      <div class="open-items-impact-tabs" role="tablist" aria-label="Impact filter">
-        ${impactTabs.map((tab) => `
-          <button
-            type="button"
-            class="open-items-impact-tab${selectedOpenItemsImpactTab === tab.id ? " is-active" : ""}"
-            data-open-items-impact-tab="${escapeHtml(tab.id)}"
-          >
-            <span>${escapeHtml(tab.label)}</span>
-            <strong>${tab.items.length}</strong>
-          </button>
-        `).join("")}
-      </div>
-      <div class="open-items-status-tabs" role="tablist" aria-label="Estados de open items">
-        ${availableStatusTabs.map(([status, items]) => `
-          <button
-            type="button"
-            class="open-items-status-tab${selectedOpenItemsStatusTab === status ? " is-active" : ""}"
-            data-open-items-status-tab="${escapeHtml(status)}"
-          >
-            <span>${escapeHtml(status)}</span>
-            <strong>${items.length}</strong>
-          </button>
-        `).join("")}
-      </div>
-      <div class="open-items-ticket-tabs" role="tablist" aria-label="Open items">
-        ${selectedStatusItems.map((item) => `
-          <button
-            type="button"
-            class="open-items-ticket-tab${selectedItem?.id === item.id ? " is-active" : ""}"
-            data-open-item-ticket-tab="${escapeHtml(item.id)}"
-          >
-            <span>${escapeHtml(item.id)}</span>
-            <strong>${escapeHtml(item.title)}</strong>
-          </button>
-        `).join("")}
+      <div class="open-items-nav-group">
+        <span class="open-items-nav-label">Open Items</span>
+        <div class="open-items-ticket-tabs" role="tablist" aria-label="Open items">
+          ${visibleStatusItems.map((item) => `
+            <button
+              type="button"
+              class="open-items-ticket-tab${selectedItem?.id === item.id ? " is-active" : ""}"
+              data-open-item-ticket-tab="${escapeHtml(item.id)}"
+            >
+              <span>${escapeHtml(item.id)}</span>
+              <strong>${escapeHtml(item.title)}</strong>
+            </button>
+          `).join("")}
+        </div>
       </div>
       <div class="open-items-active-card"></div>
     </div>
   `;
 
-  openItemsList.querySelectorAll("[data-open-items-impact-tab]").forEach((button) => {
+  document.querySelectorAll("[data-open-items-impact-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedOpenItemsImpactTab = button.dataset.openItemsImpactTab || "impacting";
       selectedOpenItemId = "";
@@ -2198,7 +2740,7 @@ function renderOpenItems() {
     });
   });
 
-  openItemsList.querySelectorAll("[data-open-items-status-tab]").forEach((button) => {
+  document.querySelectorAll("[data-open-items-status-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedOpenItemsStatusTab = button.dataset.openItemsStatusTab || "NEW";
       selectedOpenItemId = "";
@@ -2422,15 +2964,17 @@ function refreshDerivedViews() {
 }
 
 async function saveState() {
-  const response = await fetch(apiUrl("/api/state"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(state),
+  await withGlobalBusy(async () => {
+    const response = await fetch(apiUrl("/api/state"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state),
+    });
+    const payload = await parseApiResponse(response, "No se pudo guardar el estado.");
+    Object.assign(state, payload.state);
+    refreshDerivedViews();
+    await loadPreSessionDashboard();
   });
-  const payload = await parseApiResponse(response, "No se pudo guardar el estado.");
-  Object.assign(state, payload.state);
-  refreshDerivedViews();
-  await loadPreSessionDashboard();
 }
 
 async function saveStateSilently() {
@@ -2666,13 +3210,22 @@ openItemForm.addEventListener("submit", async (event) => {
   };
 
   state.openItems.push(nextOpenItem);
+  selectedOpenItemsImpactTab = isPrivilegedOpenItemsViewer()
+    ? "all"
+    : ((getCurrentEvaluator().area && impactedAreaIds.includes(getCurrentEvaluator().area)) ? "impacting" : "not-impacting");
+  selectedOpenItemsStatusTab = "NEW";
+  selectedOpenItemId = nextOpenItem.id;
 
   event.currentTarget.reset();
+  openItemDrawerDescriptionExpanded = false;
+  syncOpenItemDrawerDescription();
   updateNextOpenItemSuggestion(true);
   refreshDerivedViews();
 
   try {
     await saveState();
+    setOpenItemDrawerVisibility(false);
+    showAppToast("Open Item created");
   } catch (error) {
     state.openItems = state.openItems.filter((item) => item !== nextOpenItem);
     refreshDerivedViews();
@@ -2681,8 +3234,13 @@ openItemForm.addEventListener("submit", async (event) => {
 });
 
 document.getElementById("save-state").addEventListener("click", async () => {
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
   try {
     await saveState();
+    showAppToast("Dato actualizado");
   } catch (error) {
     window.alert(error.message || "No se pudo guardar el estado.");
   }
@@ -2710,10 +3268,30 @@ document.getElementById("export-state").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
+document.getElementById("export-debug-state")?.addEventListener("click", () => {
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `ccb-debug-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
 document.getElementById("load-seed").addEventListener("click", async () => {
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
   try {
-    const response = await fetch(apiUrl("/api/reset"), { method: "POST" });
-    await applyImportedPayload(response);
+    await withGlobalBusy(async () => {
+      const response = await fetch(apiUrl("/api/reset"), { method: "POST" });
+      await applyImportedPayload(response);
+    });
   } catch (error) {
     window.alert(error.message || "No se pudo restaurar la demo.");
   }
@@ -2859,6 +3437,24 @@ tabButtons.forEach((button) => {
   button.addEventListener("click", () => activateTab(button.dataset.tab));
 });
 
+document.addEventListener("click", (event) => {
+  if (!headerOpenItemSearch || !openItemsSearchPanelOpen) {
+    return;
+  }
+  const shell = headerOpenItemSearch.querySelector("[data-open-item-search-shell]");
+  if (shell && !shell.contains(event.target)) {
+    closeOpenItemSearchPanel();
+    renderHeaderOpenItemSearch();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && openItemsSearchPanelOpen) {
+    closeOpenItemSearchPanel();
+    renderHeaderOpenItemSearch();
+  }
+});
+
 document.getElementById("run-live-sync").addEventListener("click", async () => {
   try {
     const response = await fetch(apiUrl("/api/live-sync/run"), { method: "POST" });
@@ -2880,6 +3476,30 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
     window.alert(error.message || "No se pudo ejecutar la sincronizacion.");
   }
 });
+
+openNewItemDrawerButton.addEventListener("click", () => {
+  openItemDrawerDescriptionExpanded = false;
+  syncOpenItemDrawerDescription();
+  setOpenItemDrawerVisibility(true);
+});
+
+document.querySelectorAll("[data-new-item-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setOpenItemDrawerVisibility(false);
+  });
+});
+
+toggleOpenItemDescriptionButton.addEventListener("click", () => {
+  openItemDrawerDescriptionExpanded = true;
+  syncOpenItemDrawerDescription();
+  openItemDescriptionField.focus();
+});
+
+openItemDescriptionField.addEventListener("input", () => {
+  syncOpenItemDrawerDescription();
+});
+
+syncOpenItemDrawerDescription();
 
 document.getElementById("governance-settings-toggle").addEventListener("click", () => {
   governanceSettingsDrawer.hidden = false;

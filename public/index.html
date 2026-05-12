@@ -31,8 +31,11 @@
           <div id="prerequisite-card" class="status-pill"></div>
         </div>
         <div class="app-header-user">
-          <div id="current-user" class="meta-line"></div>
-          <button id="logout-button" class="secondary">Salir</button>
+          <div class="app-header-user-main">
+            <div id="current-user" class="meta-line"></div>
+            <button id="logout-button" class="secondary">Salir</button>
+          </div>
+          <div id="header-open-item-search" class="header-open-item-search" hidden></div>
         </div>
       </header>
 
@@ -53,9 +56,9 @@
                 <p class="meta-line">Executive risk posture, approval blockers and operating signals for the CCB workflow.</p>
               </div>
               <div class="button-row">
-                <button id="source-status-toggle" class="secondary">Data source</button>
-                <button id="governance-settings-toggle" class="secondary">Governance Settings</button>
-                <button id="copy-report" class="secondary">Copiar resumen</button>
+                <button id="source-status-toggle" class="secondary">◌ Data source</button>
+                <button id="governance-settings-toggle" class="secondary">⚙ Governance Settings</button>
+                <button id="copy-report" class="secondary">⎘ Copy summary</button>
               </div>
             </div>
 
@@ -152,43 +155,69 @@
 
         <section class="tab-panel" data-tab-panel="items">
           <section class="panel">
-            <div class="section-heading">
-              <h2>Nuevo open item</h2>
+            <div class="open-items-toolbar">
+              <div class="open-items-toolbar-main">
+                <div>
+                  <h2>Open items activos</h2>
+                  <p class="meta-line">Workspace operativo para seguimiento, aprobacion y evaluacion CCB.</p>
+                </div>
+                <div id="open-items-toolbar-filters" class="open-items-toolbar-filters"></div>
+              </div>
               <div class="button-row">
-                <button id="save-state" class="secondary">Guardar cambios</button>
-                <button id="load-seed" class="secondary">Restaurar demo</button>
+                <button id="open-new-item-drawer" type="button">＋ New item</button>
+                <details id="open-items-admin-menu" class="admin-menu" hidden>
+                  <summary class="secondary">⋯ Admin</summary>
+                  <div class="admin-menu-panel">
+                    <button id="save-state" type="button" class="secondary">💾 Save changes</button>
+                    <button id="load-seed" type="button" class="secondary">↺ Restore demo</button>
+                    <button id="export-debug-state" type="button" class="secondary">⇩ Export debug JSON</button>
+                  </div>
+                </details>
               </div>
-            </div>
-            <form id="open-item-form" class="grid-form" autocomplete="off">
-              <input id="open-item-id-input" name="id" placeholder="ID, ej. OI_003" autocomplete="off" required />
-              <p id="next-open-item-hint" class="meta-line form-hint"></p>
-              <input name="title" placeholder="Titulo" required />
-              <input name="sourceRef" placeholder="Referencia fuente" />
-              <select name="ownerAreaId" id="owner-area-select" required></select>
-              <select name="status">
-                <option value="open">Open</option>
-                <option value="deferred">Deferred</option>
-                <option value="closed">Closed</option>
-              </select>
-              <label class="checkbox">
-                <input type="checkbox" name="isSubstantial" />
-                Cambio sustancial
-              </label>
-              <textarea name="description" placeholder="Descripcion del open item" rows="3"></textarea>
-              <div>
-                <p class="field-label">Areas impactadas</p>
-                <div id="impacted-areas" class="checkbox-list"></div>
-              </div>
-              <button type="submit">Crear open item</button>
-            </form>
-          </section>
-
-          <section class="panel">
-            <div class="section-heading">
-              <h2>Open items activos</h2>
             </div>
             <div id="open-items-list" class="card-grid"></div>
           </section>
+
+          <aside id="new-open-item-drawer" class="form-drawer" hidden>
+            <div class="form-drawer-backdrop" data-new-item-close></div>
+            <div class="form-drawer-panel">
+              <div class="section-heading">
+                <div>
+                  <h3>New Open Item</h3>
+                  <p class="meta-line">Create a new issue with only the essential fields visible first.</p>
+                </div>
+                <button type="button" class="secondary" data-new-item-close>Cancel</button>
+              </div>
+              <form id="open-item-form" class="grid-form open-item-drawer-form" autocomplete="off">
+                <input id="open-item-id-input" name="id" placeholder="Open Item ID" autocomplete="off" required />
+                <p id="next-open-item-hint" class="meta-line form-hint"></p>
+                <input name="title" placeholder="Title" required />
+                <input name="sourceRef" placeholder="Reference Source" />
+                <select name="ownerAreaId" id="owner-area-select" required></select>
+                <select name="status">
+                  <option value="open">Open</option>
+                  <option value="deferred">Deferred</option>
+                  <option value="closed">Closed</option>
+                </select>
+                <label class="checkbox">
+                  <input type="checkbox" name="isSubstantial" />
+                  Substantial Change
+                </label>
+                <div>
+                  <p class="field-label">Impacted Areas</p>
+                  <div id="impacted-areas" class="checkbox-list"></div>
+                </div>
+                <div class="open-item-description-disclosure">
+                  <button id="toggle-open-item-description" type="button" class="secondary">＋ Add description</button>
+                  <textarea id="open-item-description-field" name="description" placeholder="Description" rows="4" hidden></textarea>
+                </div>
+                <div class="form-drawer-footer">
+                  <button type="button" class="secondary" data-new-item-close>Cancel</button>
+                  <button type="submit">Create Open Item</button>
+                </div>
+              </form>
+            </div>
+          </aside>
         </section>
 
         <section class="tab-panel" data-tab-panel="presession">
@@ -304,22 +333,20 @@
               <p class="item-id"></p>
               <h3 class="item-title"></h3>
             </div>
-            <div class="open-item-compact-status">
-              <span class="badge"></span>
-              <span class="decision-pill item-recommendation"></span>
-            </div>
           </div>
+          <div class="open-item-compact-status"></div>
           <div class="open-item-score-strip">
             <div><span>Avg</span><strong class="item-average-score"></strong></div>
             <div><span>Evaluators</span><strong class="item-evaluator-count"></strong></div>
             <div><span>Pending</span><strong class="item-pending-count"></strong></div>
             <div><span>Impacted</span><strong class="item-impacted-count"></strong></div>
           </div>
-          <div class="open-item-chip-row item-chip-list"></div>
           <div class="open-item-detail-tabs" data-open-item-detail-tabs></div>
           <div class="open-item-detail-panel" data-open-item-detail-panel></div>
         </article>
       </template>
+
+      <div id="app-toast" class="app-toast" hidden></div>
     </main>
 
     <script src="app.js"></script>
