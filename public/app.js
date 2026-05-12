@@ -32,6 +32,11 @@ const summaryTrends = document.getElementById("summary-trends");
 const sourceStatusPill = document.getElementById("source-status-pill");
 const governanceSettingsDrawer = document.getElementById("governance-settings-drawer");
 const openItemTemplate = document.getElementById("open-item-template");
+const changeManagerTabButton = document.getElementById("change-manager-tab-button");
+const changeManagerReadyList = document.getElementById("change-manager-ready-list");
+const changeManagerActiveList = document.getElementById("change-manager-active-list");
+const changeManagerDrawer = document.getElementById("change-manager-drawer");
+const changeManagerForm = document.getElementById("change-manager-form");
 const csvFileInput = document.getElementById("csv-file-input");
 const employeesCsvFileInput = document.getElementById("employees-csv-file-input");
 const liveSyncEnabled = document.getElementById("live-sync-enabled");
@@ -151,6 +156,7 @@ let selectedDailyReportOpenItemId = "";
 let selectedOpenItemsImpactTab = "impacting";
 let selectedOpenItemsStatusTab = "NEW";
 let selectedOpenItemId = "";
+let selectedChangeManagerOpenItemId = "";
 let openItemsSearchQuery = "";
 let openItemsSearchDebounceId = null;
 let openItemsSearchPanelOpen = false;
@@ -182,9 +188,16 @@ function apiUrl(path) {
   return `${APP_BASE_PATH}${path}`;
 }
 
+function normalizeOpenItemId(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
 function normalizeTabId(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (["summary", "items", "presession", "sources", "framework"].includes(normalized)) {
+  if (normalized === "openitems" || normalized === "open-items") {
+    return "items";
+  }
+  if (["summary", "items", "presession", "sources", "framework", "change-manager"].includes(normalized)) {
     return normalized;
   }
   return "summary";
@@ -193,7 +206,7 @@ function normalizeTabId(value) {
 function applyDeepLinkFromUrl() {
   const url = new URL(window.location.href);
   deepLinkState.tab = normalizeTabId(url.searchParams.get("tab"));
-  deepLinkState.openItemId = String(url.searchParams.get("openItemId") || "").trim();
+  deepLinkState.openItemId = normalizeOpenItemId(url.searchParams.get("openItemId"));
   deepLinkState.areaId = String(url.searchParams.get("areaId") || "").trim();
 
   if (deepLinkState.openItemId) {
@@ -909,6 +922,10 @@ function renderPreSessionDashboard() {
 }
 
 function activateTab(tabId) {
+  if (tabId === "change-manager" && !isChangeManagerUser()) {
+    showAppToast("Not authorized");
+    tabId = "summary";
+  }
   tabButtons.forEach((button) => {
     button.classList.toggle("is-active", button.dataset.tab === tabId);
   });
@@ -1045,6 +1062,10 @@ function renderHeaderOpenItemSearch() {
 
 function isAdminOverrideUser() {
   return String(getCurrentEvaluator().email || "").toLowerCase() === "rodrigo@conceivable.life";
+}
+
+function isChangeManagerUser() {
+  return isAdminOverrideUser();
 }
 
 function getVotingPermission(item) {
@@ -1329,6 +1350,99 @@ function getOpenItemPendingAreas(openItem) {
   return impactedAreaIds
     .filter((areaId) => !approvedAreaIds.has(areaId))
     .map((areaId) => state.areas.find((area) => area.id === areaId)?.name || areaId);
+}
+
+function getOpenItemApprovalDate(openItem) {
+  return openItem.implementationApprovalDate || openItem.ccbDecisionLastUpdated || openItem.lastEvaluationDate || "";
+}
+
+function isCcbApproved(openItem) {
+  const recommendation = String(openItem.ccbDecisionRecommendation || "").trim().toUpperCase();
+  const averageScore = Number(openItem.ccbDecisionAverageScore || 0);
+  const evaluatorCount = Number(openItem.ccbDecisionEvaluatorCount || 0);
+  return recommendation === "APPROVE" && averageScore > 0 && evaluatorCount > 0;
+}
+
+function hasCompletedImpactedApprovals(openItem) {
+  const impactedAreaIds = Array.isArray(openItem.impactedAreaIds) ? openItem.impactedAreaIds.filter(Boolean) : [];
+  if (!impactedAreaIds.length) {
+    return false;
+  }
+  return getOpenItemPendingAreas(openItem).length === 0;
+}
+
+function normalizeImplementationStatus(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "open") {
+    return "Open";
+  }
+
+  if (normalized === "in progress") {
+    return "In Progress";
+  }
+
+  if (normalized === "closed") {
+    return "Closed";
+  }
+
+  return "";
+}
+
+function getImplementationTrackingStatusValue(openItem) {
+  return normalizeImplementationStatus(openItem.implementationStatus || "");
+}
+
+function hasImplementationTracking(openItem) {
+  const trackingSignals = [
+    openItem.createdAt,
+    openItem.dueDate,
+    openItem.jiraTicketsRelated,
+    openItem.gitRepository,
+    openItem.minutesRelated,
+    openItem.description,
+    openItem.branchLocation,
+    openItem.implementationNotes,
+  ];
+  return trackingSignals.some((value) => Boolean(String(value || "").trim())) || Boolean(String(openItem.implementationTrackingCreatedAt || "").trim());
+}
+
+function isOpenItemReadyForImplementation(openItem) {
+  return isCcbApproved(openItem) && hasCompletedImpactedApprovals(openItem) && !hasImplementationTracking(openItem);
+}
+
+function isOpenItemImplementationActive(openItem) {
+  return isCcbApproved(openItem) && hasCompletedImpactedApprovals(openItem) && hasImplementationTracking(openItem);
+}
+
+function getImplementationTrackingStatusLabel(openItem) {
+  const normalized = getImplementationTrackingStatusValue(openItem);
+  if (!normalized) {
+    return "Tracking not created";
+  }
+  return normalized;
+}
+
+async function saveImplementationTracking(openItemId, payload) {
+  const response = await fetch(apiUrl("/api/change-manager/tracking/save"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      openItemId,
+      ...payload,
+    }),
+  });
+  const result = await parseApiResponse(response, "No se pudo guardar el implementation tracking.");
+  Object.assign(state, result.state);
+  return result;
 }
 
 function getOpenItemEvaluationCompletion(openItem) {
@@ -1886,7 +2000,8 @@ function getOpenItemEditMode(openItemId) {
 }
 
 function handleFindTicketSelect(openItemId) {
-  const targetItem = state.openItems.find((item) => item.id === openItemId);
+  const normalizedOpenItemId = normalizeOpenItemId(openItemId);
+  const targetItem = state.openItems.find((item) => normalizeOpenItemId(item.id) === normalizedOpenItemId);
   if (!targetItem) {
     return;
   }
@@ -2006,17 +2121,22 @@ function renderOpenItems() {
   const visibleStatusItems = normalizedTicketSearch
     ? selectedStatusItems.filter(matchesTicketSearch)
     : selectedStatusItems;
-  if (selectedStatusItems.length && !selectedStatusItems.some((item) => item.id === selectedOpenItemId)) {
-    selectedOpenItemId = selectedStatusItems[0].id;
+  const forcedLinkedItem = deepLinkState.openItemId
+    ? allActiveItems.find((item) => normalizeOpenItemId(item.id) === normalizeOpenItemId(deepLinkState.openItemId)) || null
+    : null;
+  const effectiveStatusItems = forcedLinkedItem ? [forcedLinkedItem] : selectedStatusItems;
+  const effectiveVisibleItems = forcedLinkedItem ? [forcedLinkedItem] : visibleStatusItems;
+  if (effectiveStatusItems.length && !effectiveStatusItems.some((item) => item.id === selectedOpenItemId)) {
+    selectedOpenItemId = effectiveStatusItems[0].id;
   }
-  if (!selectedStatusItems.length) {
+  if (!effectiveStatusItems.length) {
     selectedOpenItemId = "";
   }
-  if (visibleStatusItems.length && !visibleStatusItems.some((item) => item.id === selectedOpenItemId)) {
-    selectedOpenItemId = visibleStatusItems[0].id;
+  if (effectiveVisibleItems.length && !effectiveVisibleItems.some((item) => item.id === selectedOpenItemId)) {
+    selectedOpenItemId = effectiveVisibleItems[0].id;
   }
 
-  const selectedItem = visibleStatusItems.find((item) => item.id === selectedOpenItemId) || visibleStatusItems[0] || null;
+  const selectedItem = effectiveVisibleItems.find((item) => item.id === selectedOpenItemId) || effectiveVisibleItems[0] || null;
   openItemsToolbarFilters.innerHTML = `
     <div class="open-items-nav-group">
       <span class="open-items-nav-label">Scope</span>
@@ -2394,6 +2514,16 @@ function renderOpenItems() {
         const isEditingTitle = editMode === "title";
         const isEditingDescription = editMode === "description";
         const isEditingOwner = editMode === "owner";
+        const implementationTrackingSummary = [
+          ["Implementation Status", getImplementationTrackingStatusLabel(item)],
+          ["Date Created", item.createdAt ? String(item.createdAt).slice(0, 10) : "Not specified"],
+          ["Due Date", item.dueDate ? String(item.dueDate).slice(0, 10) : "Not specified"],
+          ["Minutes Related", item.minutesRelated || "Not specified"],
+          ["Git Repository", item.gitRepository || "Not specified"],
+          ["Jira Tickets Related", item.jiraTicketsRelated || "Not specified"],
+          ["Branch / Stream", item.branchLocation || "Not specified"],
+          ["Implementation Notes", item.implementationNotes || "Not specified"],
+        ];
         node.querySelector(".open-item-compact-title").innerHTML = `
           <p class="item-id">${escapeHtml(item.id)}</p>
           ${
@@ -2470,6 +2600,17 @@ function renderOpenItems() {
             </div>
             <div class="open-item-pane-block open-item-pane-block--wide">
               ${renderEvaluationSummary(item)}
+            </div>
+            <div class="open-item-pane-block open-item-pane-block--wide">
+              <p class="field-label">Implementation Tracking</p>
+              <div class="open-item-pane-grid open-item-pane-grid--implementation">
+                ${implementationTrackingSummary.map(([label, value]) => `
+                  <div class="open-item-pane-block">
+                    <p class="field-label">${escapeHtml(label)}</p>
+                    <p class="meta-line">${escapeHtml(value)}</p>
+                  </div>
+                `).join("")}
+              </div>
             </div>
           </div>
         `;
@@ -2716,7 +2857,7 @@ function renderOpenItems() {
       <div class="open-items-nav-group">
         <span class="open-items-nav-label">Open Items</span>
         <div class="open-items-ticket-tabs" role="tablist" aria-label="Open items">
-          ${visibleStatusItems.map((item) => `
+          ${effectiveVisibleItems.map((item) => `
             <button
               type="button"
               class="open-items-ticket-tab${selectedItem?.id === item.id ? " is-active" : ""}"
@@ -2759,6 +2900,122 @@ function renderOpenItems() {
   if (cardHost && selectedItem) {
     cardHost.appendChild(renderOpenItemCard(selectedItem));
   }
+
+  renderChangeManagerView();
+}
+
+function setChangeManagerDrawerVisibility(visible) {
+  if (!changeManagerDrawer) {
+    return;
+  }
+  changeManagerDrawer.hidden = !visible;
+}
+
+function renderChangeManagerView() {
+  if (!changeManagerTabButton) {
+    return;
+  }
+
+  const allowed = isChangeManagerUser();
+  changeManagerTabButton.hidden = !allowed;
+  if (!allowed) {
+    if (deepLinkState.tab === "change-manager") {
+      activateTab("summary");
+      showAppToast("Not authorized");
+    }
+    if (changeManagerReadyList) {
+      changeManagerReadyList.innerHTML = "";
+    }
+    if (changeManagerActiveList) {
+      changeManagerActiveList.innerHTML = "";
+    }
+    return;
+  }
+
+  const readyItems = state.openItems
+    .filter((item) => isOpenItemReadyForImplementation(item))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const activeItems = state.openItems
+    .filter((item) => isOpenItemImplementationActive(item))
+    .sort((left, right) => String(right.dueDate || right.implementationTrackingCreatedAt || "").localeCompare(String(left.dueDate || left.implementationTrackingCreatedAt || "")) || left.id.localeCompare(right.id));
+
+  const renderRows = (items, mode) => {
+    if (!items.length) {
+      return `<div class="change-manager-empty-state">${mode === "active" ? "No implementation tracking records yet." : "No approved items are ready for implementation tracking."}</div>`;
+    }
+    return `
+      <div class="change-manager-list">
+        ${items.map((item) => `
+          <article class="change-manager-issue-row">
+            <div class="change-manager-issue-main">
+              <div class="change-manager-issue-identity">
+                <span class="chip">${escapeHtml(item.id)}</span>
+                <h4>${escapeHtml(item.title || "Untitled Open Item")}</h4>
+              </div>
+              <p class="meta-line">${escapeHtml(item.ownerName || "Unassigned")}</p>
+            </div>
+            <div class="change-manager-issue-meta">
+              <div class="change-manager-meta-item">
+                <span>Approved</span>
+                <strong>${escapeHtml(formatDateTime(getOpenItemApprovalDate(item) || "")) || "N/A"}</strong>
+              </div>
+              <div class="change-manager-meta-item">
+                <span>CCB score</span>
+                <strong>${escapeHtml(Number.isFinite(Number(item.ccbDecisionAverageScore)) ? Number(item.ccbDecisionAverageScore).toFixed(2) : "N/A")}</strong>
+              </div>
+              <div class="change-manager-meta-item">
+                <span>CCB status</span>
+                <strong>${escapeHtml(item.ccbDecisionRecommendation || "INCOMPLETE")}</strong>
+              </div>
+              <div class="change-manager-meta-item">
+                <span>Impacted</span>
+                <strong>${escapeHtml(impactedAreaNames(item) || "None")}</strong>
+              </div>
+              <div class="change-manager-meta-item">
+                <span>Implementation</span>
+                <strong>${escapeHtml(mode === "ready" ? "Tracking not created" : getImplementationTrackingStatusLabel(item))}</strong>
+              </div>
+            </div>
+            <div class="change-manager-issue-actions">
+              <button type="button" class="secondary compact-action" data-change-manager-open="${escapeHtml(item.id)}">
+                ${mode === "ready" ? "+ Create tracking" : "Update tracking"}
+              </button>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    `;
+  };
+
+  changeManagerReadyList.innerHTML = renderRows(readyItems, "ready");
+  changeManagerActiveList.innerHTML = renderRows(activeItems, "active");
+
+  document.querySelectorAll("[data-change-manager-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedChangeManagerOpenItemId = button.dataset.changeManagerOpen || "";
+      const item = state.openItems.find((candidate) => candidate.id === selectedChangeManagerOpenItemId);
+      if (!item || !changeManagerForm) {
+        return;
+      }
+      document.getElementById("cm-open-item-id").textContent = item.id;
+      document.getElementById("cm-owner").textContent = item.ownerName || "Unassigned";
+      document.getElementById("cm-title").textContent = item.title || "";
+      document.getElementById("cm-ccb-score").textContent = Number.isFinite(Number(item.ccbDecisionAverageScore)) ? Number(item.ccbDecisionAverageScore).toFixed(2) : "N/A";
+      document.getElementById("cm-ccb-status").textContent = item.ccbDecisionRecommendation || item.externalStatus || "INCOMPLETE";
+      document.getElementById("cm-approved-date").textContent = formatDateTime(getOpenItemApprovalDate(item) || "");
+      document.getElementById("cm-status").value = getImplementationTrackingStatusValue(item) || "Open";
+      document.getElementById("cm-date-created").value = String(item.createdAt || "").slice(0, 10);
+      document.getElementById("cm-due-date").value = String(item.dueDate || "").slice(0, 10);
+      document.getElementById("cm-comments").value = item.description || "";
+      document.getElementById("cm-minutes-related").value = item.minutesRelated || "";
+      document.getElementById("cm-git-repository").value = item.gitRepository || "";
+      document.getElementById("cm-jira-tickets-related").value = item.jiraTicketsRelated || "";
+      document.getElementById("cm-branch-location").value = item.branchLocation || "";
+      document.getElementById("cm-implementation-notes").value = item.implementationNotes || "";
+      document.getElementById("cm-submit-button").textContent = hasImplementationTracking(item) ? "Update tracking" : "Create tracking";
+      setChangeManagerDrawerVisibility(true);
+    });
+  });
 }
 
 function buildDailyReportText(prerequisite) {
@@ -3008,6 +3265,13 @@ async function loadState() {
   renderSourceStatus();
   renderSummaryDashboard(payload.prerequisite);
   await loadPreSessionDashboard();
+  if (deepLinkState.tab === "items" && deepLinkState.openItemId) {
+    const linkedItem = state.openItems.find((item) => normalizeOpenItemId(item.id) === normalizeOpenItemId(deepLinkState.openItemId));
+    if (linkedItem) {
+      handleFindTicketSelect(linkedItem.id);
+      deepLinkState.openItemId = "";
+    }
+  }
 }
 
 async function loadEmployeeDirectory() {
@@ -3487,6 +3751,55 @@ document.querySelectorAll("[data-new-item-close]").forEach((button) => {
   button.addEventListener("click", () => {
     setOpenItemDrawerVisibility(false);
   });
+});
+
+document.querySelectorAll("[data-change-manager-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setChangeManagerDrawerVisibility(false);
+  });
+});
+
+changeManagerForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!selectedChangeManagerOpenItemId) {
+    return;
+  }
+  const formData = new FormData(changeManagerForm);
+  try {
+    let result = null;
+    await withGlobalBusy(async () => {
+      result = await saveImplementationTracking(selectedChangeManagerOpenItemId, {
+        status: formData.get("status"),
+        dateCreated: formData.get("dateCreated"),
+        dueDate: formData.get("dueDate"),
+        comments: formData.get("comments"),
+        minutesRelated: formData.get("minutesRelated"),
+        gitRepository: formData.get("gitRepository"),
+        jiraTicketsRelated: formData.get("jiraTicketsRelated"),
+        branchLocation: formData.get("branchLocation"),
+        implementationNotes: formData.get("implementationNotes"),
+      });
+    });
+    setChangeManagerDrawerVisibility(false);
+    renderOpenItems();
+    renderSummaryDashboard(derivePrerequisiteLocally());
+    const notificationStatus = result?.notification?.status || "";
+    if (notificationStatus === "override-sent") {
+      showAppToast(result?.notification?.changes ? "Tracking updated. Debug email sent to override recipient." : "Tracking created. Debug email sent to override recipient.");
+    } else if (notificationStatus === "sent") {
+      showAppToast(result?.notification?.changes ? "Tracking updated and owner notified." : "Tracking created and owner notified.");
+    } else if (notificationStatus === "missing-owner-email") {
+      showAppToast("Tracking saved, but no owner email was found.");
+    } else if (notificationStatus === "no-changes") {
+      showAppToast("No changes to notify.");
+    } else if (notificationStatus === "email-failed") {
+      showAppToast("Tracking saved, but the email notification failed.");
+    } else {
+      showAppToast("Dato actualizado");
+    }
+  } catch (error) {
+    window.alert(error.message || "No se pudo guardar el implementation tracking.");
+  }
 });
 
 toggleOpenItemDescriptionButton.addEventListener("click", () => {

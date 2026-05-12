@@ -1729,6 +1729,115 @@ button:disabled,
   min-width: 0;
 }
 
+.change-manager-shell,
+.change-manager-section {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.change-manager-section + .change-manager-section {
+  margin-top: 1rem;
+}
+
+.change-manager-table-shell {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.change-manager-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.change-manager-issue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.7fr) auto;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.85rem 0.95rem;
+  border-radius: 0.9rem;
+  background: rgba(250, 248, 243, 0.84);
+  border: 1px solid rgba(228, 225, 216, 0.5);
+}
+
+.change-manager-issue-main,
+.change-manager-issue-meta,
+.change-manager-issue-actions {
+  min-width: 0;
+}
+
+.change-manager-issue-identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.55rem;
+  margin-bottom: 0.2rem;
+}
+
+.change-manager-issue-identity h4 {
+  margin: 0.08rem 0 0;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: var(--ink-strong);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.change-manager-issue-meta {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.change-manager-meta-item {
+  min-width: 0;
+  display: grid;
+  gap: 0.14rem;
+}
+
+.change-manager-meta-item span {
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.change-manager-meta-item strong {
+  min-width: 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--ink-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-manager-issue-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.change-manager-empty-state {
+  padding: 0.95rem 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.compact-action {
+  min-height: 2rem;
+  padding: 0 0.85rem;
+  font-size: 0.8rem;
+}
+
+.change-manager-readonly-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
 .form-drawer[hidden],
 .app-toast[hidden] {
   display: none;
@@ -2388,6 +2497,7 @@ button:disabled,
 
   .area-editor-list,
   .area-editor-grid,
+  .change-manager-readonly-grid,
   .presession-owner-list--matrix,
   .daily-report-meta,
   .daily-report-votes,
@@ -2410,6 +2520,11 @@ button:disabled,
 
   .risk-governance-grid,
   .risk-matrix-grid-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .change-manager-issue-row,
+  .change-manager-issue-meta {
     grid-template-columns: 1fr;
   }
 

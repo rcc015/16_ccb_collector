@@ -44,6 +44,7 @@
           <button class="tab-button is-active" type="button" data-tab="summary">Resumen</button>
           <button class="tab-button" type="button" data-tab="presession">Pre-sesion CCB</button>
           <button class="tab-button" type="button" data-tab="items">Open Items</button>
+          <button id="change-manager-tab-button" class="tab-button" type="button" data-tab="change-manager" hidden>Change Manager View</button>
           <button class="tab-button" type="button" data-tab="sources">Fuentes</button>
           <button class="tab-button" type="button" data-tab="framework">Marco CCB</button>
         </nav>
@@ -249,6 +250,97 @@
               <div id="presession-job-status" class="report-box"></div>
             </div>
           </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="change-manager">
+          <section class="panel change-manager-shell">
+            <div class="section-heading">
+              <div>
+                <h2>Change Manager View</h2>
+                <p class="meta-line">Authorize approved Open Items into implementation tracking and maintain active delivery metadata.</p>
+              </div>
+            </div>
+
+            <div class="change-manager-section">
+              <div class="section-heading">
+                <div>
+                  <h3>Ready for Implementation</h3>
+                  <p class="meta-line">Approved items with complete impacted approvals and no active implementation tracking record yet.</p>
+                </div>
+              </div>
+              <div id="change-manager-ready-list" class="change-manager-table-shell"></div>
+            </div>
+
+            <div class="change-manager-section">
+              <div class="section-heading">
+                <div>
+                  <h3>Implementation Tracking Active</h3>
+                  <p class="meta-line">Implementation records already created and still being actively tracked.</p>
+                </div>
+              </div>
+              <div id="change-manager-active-list" class="change-manager-table-shell"></div>
+            </div>
+          </section>
+
+          <aside id="change-manager-drawer" class="form-drawer" hidden>
+            <div class="form-drawer-backdrop" data-change-manager-close></div>
+            <div class="form-drawer-panel">
+              <div class="section-heading">
+                <div>
+                  <h3>Create tracking record</h3>
+                  <p class="meta-line">Only implementation tracking fields are editable. Approval and ownership data remains read-only.</p>
+                </div>
+                <button type="button" class="secondary" data-change-manager-close>Cancel</button>
+              </div>
+              <form id="change-manager-form" class="grid-form open-item-drawer-form" autocomplete="off">
+                <div class="change-manager-readonly-grid">
+                  <div class="open-item-pane-block">
+                    <p class="field-label">Open Item ID</p>
+                    <strong id="cm-open-item-id" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">Owner</p>
+                    <strong id="cm-owner" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block open-item-pane-block--wide">
+                    <p class="field-label">Open Item Description</p>
+                    <p id="cm-title" class="meta-line"></p>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">CCB Score</p>
+                    <strong id="cm-ccb-score" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">CCB Status</p>
+                    <strong id="cm-ccb-status" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">Approval date</p>
+                    <strong id="cm-approved-date" class="inline-display-value"></strong>
+                  </div>
+                </div>
+
+                <select id="cm-status" name="status" required>
+                  <option value="Open">Open</option>
+                  <option value="In Progress">In Progress</option>
+                  <option value="Closed">Closed</option>
+                </select>
+                <input id="cm-date-created" name="dateCreated" type="date" />
+                <input id="cm-due-date" name="dueDate" type="date" />
+                <input id="cm-minutes-related" name="minutesRelated" placeholder="Minutes Related" />
+                <input id="cm-git-repository" name="gitRepository" placeholder="Git Repository" />
+                <input id="cm-jira-tickets-related" name="jiraTicketsRelated" placeholder="Jira Tickets Related" />
+                <input id="cm-branch-location" name="branchLocation" placeholder="Branch / Stream / Release Location" />
+                <textarea id="cm-comments" name="comments" rows="3" placeholder="Comments / Updates"></textarea>
+                <textarea id="cm-implementation-notes" name="implementationNotes" rows="3" placeholder="Implementation Notes"></textarea>
+
+                <div class="form-drawer-footer">
+                  <button type="button" class="secondary" data-change-manager-close>Cancel</button>
+                  <button id="cm-submit-button" type="submit">Create tracking</button>
+                </div>
+              </form>
+            </div>
+          </aside>
         </section>
 
         <section class="tab-panel" data-tab-panel="sources">
