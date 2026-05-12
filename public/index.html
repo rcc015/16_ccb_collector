@@ -21,108 +21,204 @@
     </section>
 
     <main id="app-shell" class="app-shell app-hidden">
-      <section class="hero hero-shell">
-        <div class="hero-copy-shell">
-          <p class="eyebrow">Change Control Board</p>
+      <header class="app-header">
+        <div class="app-header-brand">
           <h1>CCB Collector</h1>
-          <p class="hero-copy">
-            Controla open items, valida si existe cambio sustancial, identifica areas impactadas, registra votos y prepara el reporte diario para la sesion de CCB.
-          </p>
+          <p>Change Control Board</p>
         </div>
-        <div class="hero-side-shell">
-          <div id="prerequisite-card" class="status-card"></div>
-          <div class="button-row top-gap">
+        <div class="app-header-status">
+          <div id="source-status-pill" class="summary-source-pill"></div>
+          <div id="prerequisite-card" class="status-pill"></div>
+        </div>
+        <div class="app-header-user">
+          <div class="app-header-user-main">
             <div id="current-user" class="meta-line"></div>
             <button id="logout-button" class="secondary">Salir</button>
           </div>
+          <div id="header-open-item-search" class="header-open-item-search" hidden></div>
         </div>
-      </section>
+      </header>
 
       <section class="tab-shell">
         <nav class="tab-nav" aria-label="Secciones principales">
           <button class="tab-button is-active" type="button" data-tab="summary">Resumen</button>
           <button class="tab-button" type="button" data-tab="presession">Pre-sesion CCB</button>
           <button class="tab-button" type="button" data-tab="items">Open Items</button>
+          <button id="change-manager-tab-button" class="tab-button" type="button" data-tab="change-manager" hidden>Change Manager View</button>
           <button class="tab-button" type="button" data-tab="sources">Fuentes</button>
           <button class="tab-button" type="button" data-tab="framework">Marco CCB</button>
         </nav>
 
         <section class="tab-panel is-active" data-tab-panel="summary">
-          <section class="panel two-column">
-            <div class="panel-column">
-              <div class="section-heading">
-                <h2>Owners por area</h2>
-                <div class="button-row">
-                  <button id="update-owners-button" class="secondary">Actualizar owners</button>
-                  <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
-                  <button id="export-state" class="secondary">Exportar JSON</button>
-                </div>
+          <section class="summary-dashboard">
+            <div class="section-heading summary-dashboard-head">
+              <div>
+                <h2>Governance Overview</h2>
+                <p class="meta-line">Executive risk posture, approval blockers and operating signals for the CCB workflow.</p>
               </div>
-              <p class="meta-line">
-                Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong> y luego usa <strong>Actualizar owners</strong>.
-              </p>
               <div class="button-row">
-                <input id="employees-csv-file-input" type="file" accept=".csv,text/csv" />
-                <button id="import-employees-csv-button" class="secondary">Importar empleados CSV</button>
-                <button id="clear-employees-button" class="secondary">Limpiar empleados</button>
+                <button id="source-status-toggle" class="secondary">◌ Data source</button>
+                <button id="governance-settings-toggle" class="secondary">⚙ Governance Settings</button>
+                <button id="copy-report" class="secondary">⎘ Copy summary</button>
               </div>
-              <div id="employees-import-status" class="source-status"></div>
-              <div id="areas-list" class="area-editor-list"></div>
             </div>
 
-            <div class="panel-column">
+            <div id="source-status" class="source-status" hidden></div>
+
+            <section class="summary-section">
               <div class="section-heading">
-                <h2>Reporte diario</h2>
-                <button id="copy-report" class="secondary">Copiar resumen</button>
+                <h3>Executive KPI Overview</h3>
               </div>
-              <div id="source-status" class="source-status"></div>
-              <div id="daily-report" class="report-box"></div>
-              <p class="meta-line">
-                La app puede trabajar con snapshot local o leer/escribir directo sobre Google Sheets si configuras service account.
-              </p>
-            </div>
+              <div id="summary-kpi-grid" class="summary-kpi-grid"></div>
+              <div id="summary-more-metrics" class="summary-more-metrics"></div>
+            </section>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <h3>Risk Governance Dashboard</h3>
+                <p class="meta-line">Current and residual risk heatmaps built from impacted areas, evaluations, votes and decision posture.</p>
+              </div>
+              <div class="risk-governance-grid">
+                <div id="summary-risk-matrices" class="summary-risk-matrices"></div>
+                <aside id="summary-risk-detail" class="summary-risk-detail"></aside>
+              </div>
+            </section>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <h3>Critical Open Items</h3>
+                <p class="meta-line">Items needing immediate review due to risk, blocked approvals, pending evaluations or compliance signals.</p>
+              </div>
+              <div id="summary-critical-items" class="summary-critical-items"></div>
+              <div id="summary-critical-actions" class="summary-critical-actions"></div>
+            </section>
+
+            <section class="summary-section">
+              <div class="section-heading">
+                <div>
+                  <h3>Trends &amp; Operational Analytics</h3>
+                  <p class="meta-line">Optional deeper metrics for CCB performance tracking.</p>
+                </div>
+                <button id="summary-trends-toggle" class="secondary">Show analytics</button>
+              </div>
+              <div id="summary-trends" class="summary-trends-grid"></div>
+            </section>
+
+            <div id="daily-report" class="report-box summary-copy-report" hidden></div>
+
+            <aside id="governance-settings-drawer" class="governance-drawer" hidden>
+              <div class="governance-drawer-backdrop" data-governance-close></div>
+              <div class="governance-drawer-panel">
+                <div class="section-heading">
+                  <div>
+                    <h3>Governance Settings</h3>
+                    <p class="meta-line">Owners, mappings and synchronization controls for the governance model.</p>
+                  </div>
+                  <button type="button" class="secondary" data-governance-close>Cerrar</button>
+                </div>
+                <div class="governance-settings-groups">
+                  <section class="governance-settings-card">
+                    <div class="section-heading">
+                      <h3>Area Owners</h3>
+                      <div class="button-row">
+                        <button id="update-owners-button" class="secondary">Actualizar owners</button>
+                        <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
+                        <button id="export-state" class="secondary">Exportar JSON</button>
+                      </div>
+                    </div>
+                    <p class="meta-line">Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong>.</p>
+                    <div class="button-row">
+                      <input id="employees-csv-file-input" type="file" accept=".csv,text/csv" />
+                      <button id="import-employees-csv-button" class="secondary">Importar empleados CSV</button>
+                      <button id="clear-employees-button" class="secondary">Limpiar empleados</button>
+                    </div>
+                    <div id="employees-import-status" class="source-status"></div>
+                    <div id="areas-list" class="area-editor-list"></div>
+                  </section>
+
+                  <section class="governance-settings-card">
+                    <div class="section-heading">
+                      <h3>Governance Configuration</h3>
+                    </div>
+                    <div class="governance-settings-links">
+                      <span class="chip">User Mapping</span>
+                      <span class="chip">Risk Matrix Configuration</span>
+                      <span class="chip">Threshold Rules</span>
+                      <span class="chip">CCB Decision Rules</span>
+                    </div>
+                    <p class="meta-line">La app sigue usando datos vivos de Open Item List, CCB Evaluations, Votes, impact mappings y pending evaluators.</p>
+                  </section>
+                </div>
+              </div>
+            </aside>
           </section>
         </section>
 
         <section class="tab-panel" data-tab-panel="items">
           <section class="panel">
-            <div class="section-heading">
-              <h2>Nuevo open item</h2>
+            <div class="open-items-toolbar">
+              <div class="open-items-toolbar-main">
+                <div>
+                  <h2>Open items activos</h2>
+                  <p class="meta-line">Workspace operativo para seguimiento, aprobacion y evaluacion CCB.</p>
+                </div>
+                <div id="open-items-toolbar-filters" class="open-items-toolbar-filters"></div>
+              </div>
               <div class="button-row">
-                <button id="save-state" class="secondary">Guardar cambios</button>
-                <button id="load-seed" class="secondary">Restaurar demo</button>
+                <button id="open-new-item-drawer" type="button">＋ New item</button>
+                <details id="open-items-admin-menu" class="admin-menu" hidden>
+                  <summary class="secondary">⋯ Admin</summary>
+                  <div class="admin-menu-panel">
+                    <button id="save-state" type="button" class="secondary">💾 Save changes</button>
+                    <button id="load-seed" type="button" class="secondary">↺ Restore demo</button>
+                    <button id="export-debug-state" type="button" class="secondary">⇩ Export debug JSON</button>
+                  </div>
+                </details>
               </div>
-            </div>
-            <form id="open-item-form" class="grid-form" autocomplete="off">
-              <input id="open-item-id-input" name="id" placeholder="ID, ej. OI_003" autocomplete="off" required />
-              <p id="next-open-item-hint" class="meta-line form-hint"></p>
-              <input name="title" placeholder="Titulo" required />
-              <input name="sourceRef" placeholder="Referencia fuente" />
-              <select name="ownerAreaId" id="owner-area-select" required></select>
-              <select name="status">
-                <option value="open">Open</option>
-                <option value="deferred">Deferred</option>
-                <option value="closed">Closed</option>
-              </select>
-              <label class="checkbox">
-                <input type="checkbox" name="isSubstantial" />
-                Cambio sustancial
-              </label>
-              <textarea name="description" placeholder="Descripcion del open item" rows="3"></textarea>
-              <div>
-                <p class="field-label">Areas impactadas</p>
-                <div id="impacted-areas" class="checkbox-list"></div>
-              </div>
-              <button type="submit">Crear open item</button>
-            </form>
-          </section>
-
-          <section class="panel">
-            <div class="section-heading">
-              <h2>Open items activos</h2>
             </div>
             <div id="open-items-list" class="card-grid"></div>
           </section>
+
+          <aside id="new-open-item-drawer" class="form-drawer" hidden>
+            <div class="form-drawer-backdrop" data-new-item-close></div>
+            <div class="form-drawer-panel">
+              <div class="section-heading">
+                <div>
+                  <h3>New Open Item</h3>
+                  <p class="meta-line">Create a new issue with only the essential fields visible first.</p>
+                </div>
+                <button type="button" class="secondary" data-new-item-close>Cancel</button>
+              </div>
+              <form id="open-item-form" class="grid-form open-item-drawer-form" autocomplete="off">
+                <input id="open-item-id-input" name="id" placeholder="Open Item ID" autocomplete="off" required />
+                <p id="next-open-item-hint" class="meta-line form-hint"></p>
+                <input name="title" placeholder="Title" required />
+                <input name="sourceRef" placeholder="Reference Source" />
+                <select name="ownerAreaId" id="owner-area-select" required></select>
+                <select name="status">
+                  <option value="open">Open</option>
+                  <option value="deferred">Deferred</option>
+                  <option value="closed">Closed</option>
+                </select>
+                <label class="checkbox">
+                  <input type="checkbox" name="isSubstantial" />
+                  Substantial Change
+                </label>
+                <div>
+                  <p class="field-label">Impacted Areas</p>
+                  <div id="impacted-areas" class="checkbox-list"></div>
+                </div>
+                <div class="open-item-description-disclosure">
+                  <button id="toggle-open-item-description" type="button" class="secondary">＋ Add description</button>
+                  <textarea id="open-item-description-field" name="description" placeholder="Description" rows="4" hidden></textarea>
+                </div>
+                <div class="form-drawer-footer">
+                  <button type="button" class="secondary" data-new-item-close>Cancel</button>
+                  <button type="submit">Create Open Item</button>
+                </div>
+              </form>
+            </div>
+          </aside>
         </section>
 
         <section class="tab-panel" data-tab-panel="presession">
@@ -154,6 +250,97 @@
               <div id="presession-job-status" class="report-box"></div>
             </div>
           </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="change-manager">
+          <section class="panel change-manager-shell">
+            <div class="section-heading">
+              <div>
+                <h2>Change Manager View</h2>
+                <p class="meta-line">Authorize approved Open Items into implementation tracking and maintain active delivery metadata.</p>
+              </div>
+            </div>
+
+            <div class="change-manager-section">
+              <div class="section-heading">
+                <div>
+                  <h3>Ready for Implementation</h3>
+                  <p class="meta-line">Approved items with complete impacted approvals and no active implementation tracking record yet.</p>
+                </div>
+              </div>
+              <div id="change-manager-ready-list" class="change-manager-table-shell"></div>
+            </div>
+
+            <div class="change-manager-section">
+              <div class="section-heading">
+                <div>
+                  <h3>Implementation Tracking Active</h3>
+                  <p class="meta-line">Implementation records already created and still being actively tracked.</p>
+                </div>
+              </div>
+              <div id="change-manager-active-list" class="change-manager-table-shell"></div>
+            </div>
+          </section>
+
+          <aside id="change-manager-drawer" class="form-drawer" hidden>
+            <div class="form-drawer-backdrop" data-change-manager-close></div>
+            <div class="form-drawer-panel">
+              <div class="section-heading">
+                <div>
+                  <h3>Create tracking record</h3>
+                  <p class="meta-line">Only implementation tracking fields are editable. Approval and ownership data remains read-only.</p>
+                </div>
+                <button type="button" class="secondary" data-change-manager-close>Cancel</button>
+              </div>
+              <form id="change-manager-form" class="grid-form open-item-drawer-form" autocomplete="off">
+                <div class="change-manager-readonly-grid">
+                  <div class="open-item-pane-block">
+                    <p class="field-label">Open Item ID</p>
+                    <strong id="cm-open-item-id" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">Owner</p>
+                    <strong id="cm-owner" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block open-item-pane-block--wide">
+                    <p class="field-label">Open Item Description</p>
+                    <p id="cm-title" class="meta-line"></p>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">CCB Score</p>
+                    <strong id="cm-ccb-score" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">CCB Status</p>
+                    <strong id="cm-ccb-status" class="inline-display-value"></strong>
+                  </div>
+                  <div class="open-item-pane-block">
+                    <p class="field-label">Approval date</p>
+                    <strong id="cm-approved-date" class="inline-display-value"></strong>
+                  </div>
+                </div>
+
+                <select id="cm-status" name="status" required>
+                  <option value="Open">Open</option>
+                  <option value="In Progress">In Progress</option>
+                  <option value="Closed">Closed</option>
+                </select>
+                <input id="cm-date-created" name="dateCreated" type="date" />
+                <input id="cm-due-date" name="dueDate" type="date" />
+                <input id="cm-minutes-related" name="minutesRelated" placeholder="Minutes Related" />
+                <input id="cm-git-repository" name="gitRepository" placeholder="Git Repository" />
+                <input id="cm-jira-tickets-related" name="jiraTicketsRelated" placeholder="Jira Tickets Related" />
+                <input id="cm-branch-location" name="branchLocation" placeholder="Branch / Stream / Release Location" />
+                <textarea id="cm-comments" name="comments" rows="3" placeholder="Comments / Updates"></textarea>
+                <textarea id="cm-implementation-notes" name="implementationNotes" rows="3" placeholder="Implementation Notes"></textarea>
+
+                <div class="form-drawer-footer">
+                  <button type="button" class="secondary" data-change-manager-close>Cancel</button>
+                  <button id="cm-submit-button" type="submit">Create tracking</button>
+                </div>
+              </form>
+            </div>
+          </aside>
         </section>
 
         <section class="tab-panel" data-tab-panel="sources">
@@ -233,42 +420,25 @@
 
       <template id="open-item-template">
         <article class="open-item-card">
-          <div class="card-top">
-            <div>
+          <div class="open-item-compact-head">
+            <div class="open-item-compact-title">
               <p class="item-id"></p>
               <h3 class="item-title"></h3>
             </div>
-            <span class="badge"></span>
           </div>
-          <p class="item-description"></p>
-          <p class="meta-line"></p>
-          <p class="impact-line"></p>
-          <div class="stack open-item-owner-editor">
-            <p class="field-label">Open item owner</p>
-            <div class="autocomplete-shell">
-              <input data-open-item-owner-input placeholder="Selecciona o corrige el assignee" autocomplete="off" />
-              <div class="autocomplete-list" data-open-item-owner-autocomplete hidden></div>
-            </div>
+          <div class="open-item-compact-status"></div>
+          <div class="open-item-score-strip">
+            <div><span>Avg</span><strong class="item-average-score"></strong></div>
+            <div><span>Evaluators</span><strong class="item-evaluator-count"></strong></div>
+            <div><span>Pending</span><strong class="item-pending-count"></strong></div>
+            <div><span>Impacted</span><strong class="item-impacted-count"></strong></div>
           </div>
-          <div class="vote-list"></div>
-          <form class="vote-form stack">
-            <select name="areaId"></select>
-            <select name="decision">
-              <option value="approve">Approve</option>
-              <option value="reject">Reject</option>
-              <option value="needs-info">Needs info</option>
-            </select>
-            <input name="comment" placeholder="Comentario del voto" />
-            <button type="submit">Registrar voto</button>
-          </form>
-          <div class="open-item-evaluation-summary" data-open-item-evaluation-summary></div>
-          <button class="secondary evaluation-toggle-button" type="button" data-open-item-evaluation-toggle>
-            CCB Decision Evaluation
-          </button>
-          <div class="evaluation-panel" data-open-item-evaluation-panel hidden></div>
-          <button class="secondary close-item-button" type="button">Marcar closed</button>
+          <div class="open-item-detail-tabs" data-open-item-detail-tabs></div>
+          <div class="open-item-detail-panel" data-open-item-detail-panel></div>
         </article>
       </template>
+
+      <div id="app-toast" class="app-toast" hidden></div>
     </main>
 
     <script src="app.js"></script>

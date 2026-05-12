@@ -25,6 +25,7 @@ const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env
 const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
 const GOOGLE_OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI || "";
 const PRESESSION_EMAIL_OVERRIDE = normalizeEmail(process.env.PRESESSION_EMAIL_OVERRIDE || "");
+const ADMIN_OVERRIDE_EMAIL = "rodrigo@conceivable.life";
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const SEED_FILE = path.join(DATA_DIR, "seed.json");
 const AREA_DIRECTORY_FILE = path.join(DATA_DIR, "area-directory.json");
@@ -66,6 +67,7 @@ const OPEN_ITEM_HEADERS = [
   "CCB Status",
   "Jira Tickets Related",
 ];
+const ITL_AREA_HEADERS = ["ITL ICSI", "ITL EGG", "ITL VIT", "ITL All"];
 const AREA_HEADERS = ["id", "name", "owner", "email", "sourceColumn"];
 const VOTE_HEADERS = ["openItemId", "areaId", "decision", "comment", "voterEmail", "voterName", "voterArea", "createdAt"];
 const PRESESSION_HEADERS = [
@@ -120,6 +122,27 @@ const CCB_DECISION_AGGREGATE_HEADERS = [
   "CCB Decision Last Updated",
   "CCB Decision Evaluators",
 ];
+const IMPLEMENTATION_TRACKING_COLUMN_ALIASES = {
+  dateCreated: ["Date Created"],
+  dueDate: ["Due Date"],
+  status: ["Status"],
+  comments: ["Comments/Updates"],
+  minutesRelated: ["Minutes Related"],
+  gitRepository: ["Git Repository"],
+  jiraTicketsRelated: ["Jira Tickets Related"],
+  branchLocation: [
+    "Branch / Stream / Release Location",
+    "Branch / Stream / Release",
+    "Release Location",
+    "Branch Location",
+    "Branch",
+  ],
+  implementationNotes: [
+    "Implementation Notes",
+    "Implementation Tracking Notes",
+    "Release Notes",
+  ],
+};
 
 function stripOpenItemDecisionHeaders(headers = []) {
   return (Array.isArray(headers) ? headers : [])
@@ -351,6 +374,21 @@ async function persistStateStore(nextState) {
   return persistState(nextState);
 }
 
+async function persistEvaluationStateStore(nextState) {
+  if (!isGoogleSheetsStorageEnabled()) {
+    return persistState(nextState);
+  }
+
+  const normalizedState = sanitizeState(nextState);
+  const evaluationRows = buildCcbEvaluationRows(normalizedState);
+
+  await ensureSpreadsheetSheets([CCB_DECISION_SHEET_NAME, CCB_EVALUATIONS_SHEET_NAME]);
+  await clearAndWriteSheet(CCB_EVALUATIONS_SHEET_NAME, evaluationRows);
+  await writeDecisionSheetPreservingTemplate(normalizedState);
+
+  return loadStateFromGoogleSheets();
+}
+
 function getAreaDirectory() {
   const payload = readOptionalJson(AREA_DIRECTORY_FILE, { areas: [] });
   return Array.isArray(payload.areas) ? payload.areas : [];
@@ -508,6 +546,32 @@ function normalizeStatus(value) {
   }
 
   return "open";
+}
+
+function normalizeImplementationStatus(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "open") {
+    return "Open";
+  }
+
+  if (normalized === "in progress") {
+    return "In Progress";
+  }
+
+  if (normalized === "closed") {
+    return "Closed";
+  }
+
+  return "";
 }
 
 function slugifyCriterion(value) {
@@ -997,6 +1061,14 @@ function getCurrentUser(request) {
   return session ? session.user : null;
 }
 
+function isAdminUser(user) {
+  return normalizeEmail(user?.email) === ADMIN_OVERRIDE_EMAIL;
+}
+
+function isChangeManagerUser(user) {
+  return isAdminUser(user);
+}
+
 function requiresAuth(pathname) {
   if (pathname.startsWith("/api/auth/")) {
     return false;
@@ -1147,8 +1219,29 @@ function mapSnapshotToState(snapshot, existingState = null, areasOverride = null
         impactedAreaIds,
         isSubstantial: inferSubstantialChange(row),
         status: normalizeStatus(row.status),
+        implementationStatus: normalizeImplementationStatus(row.status || previousItem?.implementationStatus || ""),
         createdAt: row.dateCreated || new Date().toISOString(),
         dueDate: row.dueDate || "",
+        minutesRelated: row.minutesRelated || "",
+        gitRepository: row.gitRepository || "",
+        jiraTicketsRelated: row.jiraTicketsRelated || "",
+        branchLocation: String(
+          row["Branch / Stream / Release Location"] ||
+          row["Branch / Stream / Release"] ||
+          row["Release Location"] ||
+          row.Branch ||
+          previousItem?.branchLocation ||
+          ""
+        ).trim(),
+        implementationNotes: String(
+          row["Implementation Notes"] ||
+          row["Implementation Tracking Notes"] ||
+          row["Release Notes"] ||
+          previousItem?.implementationNotes ||
+          ""
+        ).trim(),
+        implementationTrackingCreatedAt: String(previousItem?.implementationTrackingCreatedAt || "").trim(),
+        implementationApprovalDate: String(previousItem?.implementationApprovalDate || "").trim(),
         externalStatus: row.ccbStatus || "",
         ccbScore: row.ccbScore || "",
         rawSheetRow: row,
@@ -1659,6 +1752,273 @@ function buildAppDeepLink(params = {}) {
   return url.toString();
 }
 
+function buildTicketDeepLink(openItemId) {
+  return buildAppDeepLink({
+    tab: "openItems",
+    openItemId,
+  });
+}
+
+function resolveImplementationOwnerContact(item, state) {
+  const contactsDirectory = buildKnownContactsDirectory(state?.areas || []);
+  return resolveContactByValue(item.ownerEmail || item.ownerName, contactsDirectory)
+    || resolveContactByValue(item.ownerName, contactsDirectory)
+    || null;
+}
+
+function formatImplementationFieldValue(value) {
+  const text = String(value || "").trim();
+  return text || "Not specified";
+}
+
+function formatEmailDateOnly(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "Not specified";
+  }
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) {
+    return match[1];
+  }
+  const reverseMatch = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (reverseMatch) {
+    return `${reverseMatch[3]}-${reverseMatch[2]}-${reverseMatch[1]}`;
+  }
+  return text;
+}
+
+function buildImplementationUpdateSummary(before = {}, after = {}) {
+  const fieldDefs = [
+    ["status", "Status"],
+    ["dateCreated", "Date Created"],
+    ["dueDate", "Due Date"],
+    ["comments", "Comments/Updates"],
+    ["minutesRelated", "Minutes Related"],
+    ["gitRepository", "Git Repository"],
+    ["jiraTicketsRelated", "Jira Tickets Related"],
+    ["branchLocation", "Branch / Stream / Release Location"],
+    ["implementationNotes", "Implementation Notes"],
+  ];
+
+  return fieldDefs.reduce((changes, [key, label]) => {
+    const beforeValue = String(before[key] || "").trim();
+    const afterValue = String(after[key] || "").trim();
+    if (beforeValue === afterValue) {
+      return changes;
+    }
+    changes.push({
+      key,
+      label,
+      before: beforeValue,
+      after: afterValue,
+    });
+    return changes;
+  }, []);
+}
+
+function buildImplementationAssignmentEmailSubject(item) {
+  return `CCB Open Item Assigned for Implementation: ${item.id} - ${item.title}`;
+}
+
+function buildImplementationUpdateEmailSubject(item) {
+  return `CCB Open Item Updated: ${item.id} - ${item.title}`;
+}
+
+function buildImplementationAssignedEmailBody(item, trackingData, owner, ticketLink, intendedRecipient = "", state = null) {
+  const impactedAreaNames = (item.impactedAreaIds || [])
+    .map((areaId) => state?.areas?.find((area) => area.id === areaId)?.name || areaId)
+    .filter(Boolean);
+  const lines = [
+    `Hello ${owner?.name || item.ownerName || intendedRecipient || "Owner"},`,
+    "",
+    "The following CCB-approved Open Item has been assigned to you for implementation tracking.",
+    "",
+    `Open Item: ${item.id} - ${item.title}`,
+    `Owner: ${item.ownerName || "Not specified"}`,
+    `CCB Status: ${item.ccbDecisionRecommendation || "APPROVE"}`,
+    `CCB Score: ${item.ccbDecisionAverageScore == null ? "Not specified" : Number(item.ccbDecisionAverageScore).toFixed(2)}`,
+    `Implementation Status: ${formatImplementationFieldValue(trackingData.status)}`,
+    `Impacted Areas: ${impactedAreaNames.join(", ") || "Not specified"}`,
+    "",
+    `Date Created: ${formatEmailDateOnly(trackingData.dateCreated)}`,
+    `Due Date: ${formatEmailDateOnly(trackingData.dueDate)}`,
+    `Jira Ticket: ${formatImplementationFieldValue(trackingData.jiraTicketsRelated)}`,
+    `Git Repository: ${formatImplementationFieldValue(trackingData.gitRepository)}`,
+    `Branch / Stream: ${formatImplementationFieldValue(trackingData.branchLocation)}`,
+  ];
+
+  if (String(trackingData.comments || "").trim()) {
+    lines.push(`Comments / Updates: ${trackingData.comments}`);
+  }
+  if (String(trackingData.implementationNotes || "").trim()) {
+    lines.push(`Implementation Notes: ${trackingData.implementationNotes}`);
+  }
+  if (PRESESSION_EMAIL_OVERRIDE) {
+    lines.push("", `Debug mode: original intended recipient was ${intendedRecipient || "Not available"}.`);
+  }
+  lines.push("", "Please review the assigned item here:", ticketLink);
+  return lines.join("\n");
+}
+
+function buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient = "") {
+  const lines = [
+    `Hello ${owner?.name || item.ownerName || intendedRecipient || "Owner"},`,
+    "",
+    "The following implementation tracking fields were updated:",
+    "",
+    ...changes.map((change) => {
+      const beforeValue = /date/i.test(change.label) ? formatEmailDateOnly(change.before) : formatImplementationFieldValue(change.before);
+      const afterValue = /date/i.test(change.label) ? formatEmailDateOnly(change.after) : formatImplementationFieldValue(change.after);
+      return `- ${change.label}: ${beforeValue} -> ${afterValue}`;
+    }),
+    "",
+    `Open Item: ${item.id} - ${item.title}`,
+    `Current implementation status: ${formatImplementationFieldValue(afterTrackingData.status)}`,
+  ];
+  if (PRESESSION_EMAIL_OVERRIDE) {
+    lines.push("", `Debug mode: original intended recipient was ${intendedRecipient || "Not available"}.`);
+  }
+  lines.push("", "Review the item:", ticketLink);
+  return lines.join("\n");
+}
+
+function buildImplementationAssignedEmailHtml(item, trackingData, owner, ticketLink, intendedRecipient = "", state = null) {
+  const ownerName = owner?.name || item.ownerName || intendedRecipient || "Owner";
+  const impactedAreaNames = (item.impactedAreaIds || [])
+    .map((areaId) => state?.areas?.find((area) => area.id === areaId)?.name || areaId)
+    .filter(Boolean);
+  const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
+
+  return `
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#FDFCF9;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;margin:0 auto;border:1px solid #E2E8F0;border-radius:24px;background:#FFFFFF;overflow:hidden;">
+      <tr>
+        <td style="padding:26px 30px;border-bottom:1px solid #E2E8F0;">
+          <div style="font-family:${sansStack};font-size:28px;line-height:1;color:#111827;font-weight:800;letter-spacing:-0.04em;">
+            conceiv<span style="color:#C88A2D;">able</span>
+            <span style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#475569;font-weight:600;vertical-align:middle;">Life Sciences</span>
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:30px;">
+          <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#C88A2D;font-weight:800;margin-bottom:8px;">Implementation Tracking</div>
+          <div style="font-family:${sansStack};font-size:30px;line-height:1.1;color:#0F172A;font-weight:800;letter-spacing:-0.04em;margin-bottom:14px;">
+            Open Item Assigned for Implementation
+          </div>
+          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;margin-bottom:20px;">
+            Hello ${escapeHtmlEmail(ownerName)},<br/>
+            The following CCB-approved Open Item has been assigned to you for implementation tracking.
+          </div>
+
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:18px;">
+            <tr>
+              <td style="padding:20px 22px;border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;">
+                <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748B;margin-bottom:8px;">${escapeHtmlEmail(item.id)}</div>
+                <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:800;letter-spacing:-0.03em;margin-bottom:14px;">${escapeHtmlEmail(item.title)}</div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#EFF6FF;color:#0F2836;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(item.ccbDecisionRecommendation || "APPROVE")}</span>
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#FFF7ED;color:#C88A2D;font-family:${sansStack};font-size:12px;font-weight:700;">Score ${escapeHtmlEmail(item.ccbDecisionAverageScore == null ? "N/A" : Number(item.ccbDecisionAverageScore).toFixed(2))}</span>
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#F1F5F9;color:#475569;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(trackingData.status || "Open")}</span>
+                </div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-family:${sansStack};font-size:14px;color:#334155;">
+                  <tr><td style="padding:4px 0;"><strong>Owner</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(item.ownerName || "Not specified")}</td></tr>
+                  <tr><td style="padding:4px 0;"><strong>Impacted Areas</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(impactedAreaNames.join(", ") || "Not specified")}</td></tr>
+                  <tr><td style="padding:4px 0;"><strong>Date Created</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatEmailDateOnly(trackingData.dateCreated))}</td></tr>
+                  <tr><td style="padding:4px 0;"><strong>Due Date</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatEmailDateOnly(trackingData.dueDate))}</td></tr>
+                  <tr><td style="padding:4px 0;"><strong>Jira Ticket</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.jiraTicketsRelated))}</td></tr>
+                  <tr><td style="padding:4px 0;"><strong>Git Repository</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.gitRepository))}</td></tr>
+                  <tr><td style="padding:4px 0;"><strong>Branch / Stream</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.branchLocation))}</td></tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+
+          <a href="${escapeHtmlEmail(ticketLink)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;">
+            Review open item
+          </a>
+          <div style="font-family:${sansStack};font-size:13px;line-height:1.7;color:#64748B;margin-top:14px;">
+            Fallback link: <a href="${escapeHtmlEmail(ticketLink)}" style="color:#0F2836;">${escapeHtmlEmail(ticketLink)}</a>
+          </div>
+          ${PRESESSION_EMAIL_OVERRIDE ? `<div style="font-family:${sansStack};font-size:12px;line-height:1.7;color:#64748B;margin-top:16px;">Debug mode: original intended recipient was ${escapeHtmlEmail(intendedRecipient || "Not available")}.</div>` : ""}
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+function buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient = "") {
+  const ownerName = owner?.name || item.ownerName || intendedRecipient || "Owner";
+  const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
+  const changeRows = changes.map((change) => {
+    const beforeValue = /date/i.test(change.label) ? formatEmailDateOnly(change.before) : formatImplementationFieldValue(change.before);
+    const afterValue = /date/i.test(change.label) ? formatEmailDateOnly(change.after) : formatImplementationFieldValue(change.after);
+    return `
+      <tr>
+        <td style="padding:14px 16px;border-top:1px solid #E2E8F0;">
+          <div style="font-family:${sansStack};font-size:13px;color:#64748B;margin-bottom:6px;">${escapeHtmlEmail(change.label)}</div>
+          <div style="font-family:${sansStack};font-size:14px;color:#334155;">From: ${escapeHtmlEmail(beforeValue)}</div>
+          <div style="font-family:${sansStack};font-size:14px;color:#0F172A;font-weight:700;">To: ${escapeHtmlEmail(afterValue)}</div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  return `
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#FDFCF9;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;margin:0 auto;border:1px solid #E2E8F0;border-radius:24px;background:#FFFFFF;overflow:hidden;">
+      <tr>
+        <td style="padding:26px 30px;border-bottom:1px solid #E2E8F0;">
+          <div style="font-family:Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif;font-size:28px;line-height:1;color:#111827;font-weight:800;letter-spacing:-0.04em;">
+            conceiv<span style="color:#C88A2D;">able</span>
+            <span style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#475569;font-weight:600;vertical-align:middle;">Life Sciences</span>
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:30px;">
+          <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#C88A2D;font-weight:800;margin-bottom:8px;">Implementation Tracking</div>
+          <div style="font-family:${sansStack};font-size:30px;line-height:1.1;color:#0F172A;font-weight:800;letter-spacing:-0.04em;margin-bottom:14px;">
+            Implementation Tracking Updated
+          </div>
+          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;margin-bottom:20px;">
+            Hello ${escapeHtmlEmail(ownerName)},<br/>
+            The implementation tracking record for this CCB-approved Open Item was updated.
+          </div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:18px;border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;overflow:hidden;">
+            <tr>
+              <td style="padding:20px 22px;border-bottom:1px solid #E2E8F0;">
+                <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748B;margin-bottom:8px;">${escapeHtmlEmail(item.id)}</div>
+                <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:800;letter-spacing:-0.03em;margin-bottom:10px;">${escapeHtmlEmail(item.title)}</div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#EFF6FF;color:#0F2836;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(item.ccbDecisionRecommendation || "APPROVE")}</span>
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#FFF7ED;color:#C88A2D;font-family:${sansStack};font-size:12px;font-weight:700;">Score ${escapeHtmlEmail(item.ccbDecisionAverageScore == null ? "N/A" : Number(item.ccbDecisionAverageScore).toFixed(2))}</span>
+                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#F1F5F9;color:#475569;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(formatImplementationFieldValue(afterTrackingData.status))}</span>
+                </div>
+              </td>
+            </tr>
+            ${changeRows}
+          </table>
+
+          <a href="${escapeHtmlEmail(ticketLink)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;">
+            Review open item
+          </a>
+          <div style="font-family:${sansStack};font-size:13px;line-height:1.7;color:#64748B;margin-top:14px;">
+            Fallback link: <a href="${escapeHtmlEmail(ticketLink)}" style="color:#0F2836;">${escapeHtmlEmail(ticketLink)}</a>
+          </div>
+          ${PRESESSION_EMAIL_OVERRIDE ? `<div style="font-family:${sansStack};font-size:12px;line-height:1.7;color:#64748B;margin-top:16px;">Debug mode: original intended recipient was ${escapeHtmlEmail(intendedRecipient || "Not available")}.</div>` : ""}
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
 function buildPreSessionEmailBody(group) {
   const appUrl = buildAppDeepLink({ tab: "presession" });
   const lines = [
@@ -1848,6 +2208,63 @@ async function sendGmailMessage({ to, subject, text, html = "" }) {
   return response.json();
 }
 
+function getImplementationTrackingDataFromItem(item) {
+  return {
+    status: normalizeImplementationStatus(item.implementationStatus || item.rawSheetRow?.Status || ""),
+    dateCreated: String(item.createdAt || "").trim(),
+    dueDate: String(item.dueDate || "").trim(),
+    comments: String(item.description || "").trim(),
+    minutesRelated: String(item.minutesRelated || "").trim(),
+    gitRepository: String(item.gitRepository || "").trim(),
+    jiraTicketsRelated: String(item.jiraTicketsRelated || "").trim(),
+    branchLocation: String(item.branchLocation || "").trim(),
+    implementationNotes: String(item.implementationNotes || "").trim(),
+  };
+}
+
+async function sendImplementationAssignedEmail(item, trackingData, owner, ticketLink, state) {
+  const intendedRecipient = normalizeEmail(owner?.email || item.ownerEmail || "");
+  if (!intendedRecipient && !PRESESSION_EMAIL_OVERRIDE) {
+    return { status: "missing-owner-email" };
+  }
+  const deliveryTarget = PRESESSION_EMAIL_OVERRIDE || intendedRecipient;
+  await sendGmailMessage({
+    to: deliveryTarget,
+    subject: buildImplementationAssignmentEmailSubject(item),
+    text: buildImplementationAssignedEmailBody(item, trackingData, owner, ticketLink, intendedRecipient, state),
+    html: buildImplementationAssignedEmailHtml(item, trackingData, owner, ticketLink, intendedRecipient, state),
+  });
+  return {
+    status: PRESESSION_EMAIL_OVERRIDE ? "override-sent" : "sent",
+    ownerEmail: intendedRecipient,
+    deliveryTarget,
+  };
+}
+
+async function sendImplementationUpdatedEmail(item, beforeTrackingData, afterTrackingData, owner, ticketLink) {
+  const changes = buildImplementationUpdateSummary(beforeTrackingData, afterTrackingData);
+  if (!changes.length) {
+    return { status: "no-changes" };
+  }
+  const intendedRecipient = normalizeEmail(owner?.email || item.ownerEmail || "");
+  if (!intendedRecipient && !PRESESSION_EMAIL_OVERRIDE) {
+    return { status: "missing-owner-email", changes };
+  }
+  const deliveryTarget = PRESESSION_EMAIL_OVERRIDE || intendedRecipient;
+  await sendGmailMessage({
+    to: deliveryTarget,
+    subject: buildImplementationUpdateEmailSubject(item),
+    text: buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient),
+    html: buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient),
+  });
+  return {
+    status: PRESESSION_EMAIL_OVERRIDE ? "override-sent" : "sent",
+    ownerEmail: intendedRecipient,
+    deliveryTarget,
+    changes,
+  };
+}
+
 async function runPreSessionRequestJob(user) {
   const state = await loadStateStore();
   const queue = buildPreSessionOwnerQueue(state);
@@ -2010,7 +2427,7 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluationInput) {
   item.pendingEvaluators = tracking.pendingEvaluators;
   item.lastEvaluationDate = tracking.lastEvaluationDate;
   updateOpenItemCcbDecision(openItemId, aggregatedDecision, state);
-  const nextState = await persistStateStore(state);
+  const nextState = await persistEvaluationStateStore(state);
   return {
     state: nextState,
     evaluation: normalizedEntries,
@@ -2387,6 +2804,136 @@ function formatMexicoCityDateTime(value) {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }
 
+function findExistingHeader(headerRow, aliases = []) {
+  const normalizedRow = (Array.isArray(headerRow) ? headerRow : []).map((header) => String(header || "").trim());
+  for (const alias of aliases) {
+    const aliasValue = String(alias || "").trim();
+    const index = normalizedRow.findIndex((header) => header.toLowerCase() === aliasValue.toLowerCase());
+    if (index >= 0) {
+      return normalizedRow[index];
+    }
+  }
+  return "";
+}
+
+function buildImplementationTrackingHeaderMap(headerRow) {
+  return Object.fromEntries(
+    Object.entries(IMPLEMENTATION_TRACKING_COLUMN_ALIASES).map(([key, aliases]) => [key, findExistingHeader(headerRow, aliases)]),
+  );
+}
+
+function getApprovedVoteAreaIds(item) {
+  return new Set((item.votes || []).filter((vote) => vote.decision === "approve").map((vote) => vote.areaId));
+}
+
+function getPendingAreaIds(item) {
+  const approvedAreaIds = getApprovedVoteAreaIds(item);
+  return (item.impactedAreaIds || []).filter((areaId) => !approvedAreaIds.has(areaId));
+}
+
+function getOpenItemApprovalDate(item) {
+  return String(
+    item.implementationApprovalDate ||
+    item.ccbDecisionLastUpdated ||
+    item.lastEvaluationDate ||
+    ""
+  ).trim();
+}
+
+function isCcbApproved(item) {
+  const recommendation = String(item.ccbDecisionRecommendation || "").trim().toUpperCase();
+  const averageScore = Number(item.ccbDecisionAverageScore || 0);
+  const evaluatorCount = Number(item.ccbDecisionEvaluatorCount || 0);
+  return recommendation === "APPROVE" && averageScore > 0 && evaluatorCount > 0;
+}
+
+function hasCompletedImpactedApprovals(item) {
+  const impactedAreaIds = Array.isArray(item.impactedAreaIds) ? item.impactedAreaIds.filter(Boolean) : [];
+  if (!impactedAreaIds.length) {
+    return false;
+  }
+  return getPendingAreaIds(item).length === 0;
+}
+
+function hasImplementationTrackingSheetSignals(item) {
+  const trackingSignals = [
+    item.createdAt,
+    item.dueDate,
+    item.description,
+    item.jiraTicketsRelated,
+    item.gitRepository,
+    item.minutesRelated,
+    item.branchLocation,
+    item.implementationNotes,
+  ];
+  return trackingSignals.some((value) => Boolean(String(value || "").trim()));
+}
+
+function getImplementationTrackingStatusValue(item) {
+  return normalizeImplementationStatus(item.implementationStatus || item.rawSheetRow?.Status || "");
+}
+
+function hasImplementationTracking(item) {
+  return hasImplementationTrackingSheetSignals(item) || Boolean(String(item.implementationTrackingCreatedAt || "").trim());
+}
+
+function isOpenItemReadyForImplementation(item) {
+  return isCcbApproved(item) && hasCompletedImpactedApprovals(item) && !hasImplementationTracking(item);
+}
+
+function isOpenItemImplementationActive(item) {
+  return isCcbApproved(item) && hasCompletedImpactedApprovals(item) && hasImplementationTracking(item);
+}
+
+async function updateOpenItemImplementationTrackingSheetRow(openItemId, updates = {}) {
+  const valuesMap = await batchGetSpreadsheetValues([SOURCE_SHEET_NAME]);
+  const existingValues = valuesMap.get(SOURCE_SHEET_NAME) || [];
+  const context = getOpenItemSheetContext(existingValues);
+  const headerMap = buildImplementationTrackingHeaderMap(context.headerRow);
+  const idColumnIndex = context.headerRow.findIndex((header) => String(header || "").trim() === "ID");
+  if (idColumnIndex < 0) {
+    throw new Error("No encontramos la columna ID en Open Item List.");
+  }
+
+  const rowIndex = context.bodyRows.findIndex((row) => String(row[idColumnIndex] || "").trim() === openItemId);
+  if (rowIndex < 0) {
+    throw new Error("No encontramos la fila del Open Item en Open Item List.");
+  }
+
+  const rowNumber = context.headerRowNumber + 1 + rowIndex;
+  const writes = [];
+  const pushWrite = (fieldKey, value) => {
+    const header = headerMap[fieldKey];
+    if (!header) {
+      return;
+    }
+    const columnIndex = context.headerRow.findIndex((entry) => String(entry || "").trim() === header);
+    if (columnIndex < 0) {
+      return;
+    }
+    const column = toA1Column(columnIndex);
+    writes.push(writeSheetRange(`${SOURCE_SHEET_NAME}!${column}${rowNumber}`, [[value]], "USER_ENTERED"));
+  };
+
+  [
+    "dateCreated",
+    "dueDate",
+    "status",
+    "comments",
+    "minutesRelated",
+    "gitRepository",
+    "jiraTicketsRelated",
+    "branchLocation",
+    "implementationNotes",
+  ].forEach((fieldKey) => {
+    if (Object.prototype.hasOwnProperty.call(updates, fieldKey)) {
+      pushWrite(fieldKey, updates[fieldKey]);
+    }
+  });
+
+  await Promise.all(writes);
+}
+
 function buildOpenItemHeaders(state, areas) {
   const existingHeaders = stripOpenItemDecisionHeaders(
     Array.isArray(state.source?.sheetHeaders) && state.source.sheetHeaders.length
@@ -2429,8 +2976,356 @@ function buildManagedDecisionHeaders() {
   return new Set([
     "OI_ID",
     "Open Item Description",
-    ...CCB_DECISION_AGGREGATE_HEADERS,
+    "CCB Decision Strategic Alignment Avg",
+    "CCB Decision Risk Assessment Avg",
+    "CCB Decision Resource Impact Avg",
+    "CCB Decision Customer Value Avg",
+    "CCB Decision Operational Feasibility Avg",
+    "Strategic Alignment Avg",
+    "Risk Assessment Avg",
+    "Resource Impact Avg",
+    "Customer Value Avg",
+    "Operational Feasibility Avg",
+    "Strategic Alignment Score",
+    "Risk Assessment Score",
+    "Resource Impact Score",
+    "Customer Value Score",
+    "Operational Feasibility Score",
+    "CCB Decision Average Score",
+    "CCB Evaluation Avg",
+    "CCB Eval Avg",
+    "CCB Ev",
+    "Total",
+    "CCB Decision Recommendation",
+    "CCB Decision Recommend",
+    "Recommendation",
+    "Status",
+    "CCB Decision Evaluator Count",
+    "CCB Evaluator Count",
+    "CCB Ev Count",
+    "Evaluator Count",
+    "CCB Decision Evaluators",
+    "Evaluators",
+    "CCB Decision Last Updated",
+    "CCB Last Updated",
+    "Last Updated",
+    "Updated At",
   ]);
+}
+
+async function saveOpenItemVote(openItemId, user, input) {
+  const state = await loadStateStore();
+  const item = (state.openItems || []).find((candidate) => candidate.id === openItemId);
+  if (!item) {
+    throw new Error("Open item no encontrado.");
+  }
+
+  const email = normalizeEmail(user?.email);
+  if (!email) {
+    throw new Error("No encontramos el correo del usuario.");
+  }
+
+  const isAdmin = isAdminUser(user);
+  const mappedArea = String(
+    state.areas.find((area) => normalizeEmail(area.email) === email)?.id || ""
+  ).trim();
+  const selectedArea = String(input?.areaId || "").trim();
+  const effectiveArea = isAdmin ? selectedArea : mappedArea;
+
+  if (!isAdmin && !mappedArea) {
+    throw new Error("You are not assigned as an owner for a CCB area.");
+  }
+  if (!effectiveArea) {
+    throw new Error("No area selected for voting.");
+  }
+  if (!isAdmin && !(item.impactedAreaIds || []).includes(mappedArea)) {
+    throw new Error("Your area is not impacted by this Open Item.");
+  }
+
+  const decision = String(input?.decision || "").trim();
+  if (!["approve", "reject", "needs-info"].includes(decision)) {
+    throw new Error("Decision de voto invalida.");
+  }
+
+  const nextVote = {
+    areaId: effectiveArea,
+    decision,
+    comment: String(input?.comment || "").trim(),
+    voterEmail: email,
+    voterName: String(user?.name || "").trim(),
+    voterArea: effectiveArea,
+    createdAt: new Date().toISOString(),
+  };
+
+  const preservedVotes = (item.votes || []).filter((vote) => vote.areaId !== effectiveArea);
+  item.votes = [...preservedVotes, nextVote];
+  if (effectiveArea && !item.impactedAreaIds.includes(effectiveArea)) {
+    item.impactedAreaIds.push(effectiveArea);
+  }
+  const tracking = deriveOpenItemTracking(state, item);
+  item.impactedAreaIds = tracking.impactedAreaIds;
+  item.impactedAreas = tracking.impactedAreas;
+  item.impactedUsers = tracking.impactedUsers;
+  item.evaluationParticipants = tracking.evaluationParticipants;
+  item.voteParticipants = tracking.voteParticipants;
+  item.pendingEvaluators = tracking.pendingEvaluators;
+  item.lastEvaluationDate = tracking.lastEvaluationDate;
+
+  const nextState = await persistStateStore(state);
+  return {
+    state: nextState,
+    vote: nextVote,
+  };
+}
+
+async function saveImplementationTracking(openItemId, user, payload = {}) {
+  if (!isChangeManagerUser(user)) {
+    throw new Error("Not authorized");
+  }
+
+  const state = await loadStateStore();
+  const item = (state.openItems || []).find((candidate) => candidate.id === openItemId);
+  if (!item) {
+    throw new Error("Open item no encontrado.");
+  }
+
+  if (!isOpenItemReadyForImplementation(item) && !isOpenItemImplementationActive(item)) {
+    throw new Error("Este Open Item aun no esta listo para implementation tracking.");
+  }
+
+  const beforeTrackingData = getImplementationTrackingDataFromItem(item);
+  const hadTracking = hasImplementationTracking(item);
+  const ownerContact = resolveImplementationOwnerContact(item, state);
+  const ticketLink = buildTicketDeepLink(openItemId);
+  const now = new Date().toISOString();
+  const nextStatus = normalizeImplementationStatus(payload.status || item.implementationStatus || "Open") || "Open";
+  const nextDateCreated = String(payload.dateCreated || "").trim() || item.createdAt || formatMexicoCityDateTime(now);
+  const nextDueDate = String(payload.dueDate || "").trim();
+  const nextComments = String(payload.comments || "").trim();
+  const nextMinutesRelated = String(payload.minutesRelated || "").trim();
+  const nextGitRepository = String(payload.gitRepository || "").trim();
+  const nextJiraTicketsRelated = String(payload.jiraTicketsRelated || "").trim();
+  const nextBranchLocation = String(payload.branchLocation || "").trim();
+  const nextImplementationNotes = String(payload.implementationNotes || "").trim();
+  const approvalDate = getOpenItemApprovalDate(item) || formatMexicoCityDateTime(now);
+
+  await updateOpenItemImplementationTrackingSheetRow(openItemId, {
+    dateCreated: item.implementationTrackingCreatedAt ? nextDateCreated : (item.createdAt || nextDateCreated),
+    dueDate: nextDueDate,
+    status: nextStatus,
+    comments: nextComments,
+    minutesRelated: nextMinutesRelated,
+    gitRepository: nextGitRepository,
+    jiraTicketsRelated: nextJiraTicketsRelated,
+    branchLocation: nextBranchLocation,
+    implementationNotes: nextImplementationNotes,
+  });
+
+  item.status = normalizeStatus(nextStatus);
+  item.implementationStatus = nextStatus;
+  item.createdAt = nextDateCreated || item.createdAt || now;
+  item.dueDate = nextDueDate;
+  item.description = nextComments;
+  item.minutesRelated = nextMinutesRelated;
+  item.gitRepository = nextGitRepository;
+  item.jiraTicketsRelated = nextJiraTicketsRelated;
+  item.branchLocation = nextBranchLocation;
+  item.implementationNotes = nextImplementationNotes;
+  item.implementationTrackingCreatedAt = item.implementationTrackingCreatedAt || now;
+  item.implementationApprovalDate = item.implementationApprovalDate || approvalDate;
+  if (item.rawSheetRow && typeof item.rawSheetRow === "object") {
+    item.rawSheetRow["Date Created"] = item.createdAt;
+    item.rawSheetRow["Due Date"] = item.dueDate;
+    item.rawSheetRow.Status = nextStatus;
+    item.rawSheetRow["Comments/Updates"] = nextComments;
+    item.rawSheetRow["Minutes Related"] = nextMinutesRelated;
+    item.rawSheetRow["Git Repository"] = nextGitRepository;
+    item.rawSheetRow["Jira Tickets Related"] = nextJiraTicketsRelated;
+    const branchHeader = findExistingHeader(Object.keys(item.rawSheetRow), IMPLEMENTATION_TRACKING_COLUMN_ALIASES.branchLocation);
+    const notesHeader = findExistingHeader(Object.keys(item.rawSheetRow), IMPLEMENTATION_TRACKING_COLUMN_ALIASES.implementationNotes);
+    if (branchHeader) {
+      item.rawSheetRow[branchHeader] = nextBranchLocation;
+    }
+    if (notesHeader) {
+      item.rawSheetRow[notesHeader] = nextImplementationNotes;
+    }
+  }
+
+  const nextState = persistState(sanitizeState(state));
+  const afterTrackingData = getImplementationTrackingDataFromItem(item);
+  let notification = { status: "not-sent" };
+  try {
+    if (!hadTracking) {
+      notification = await sendImplementationAssignedEmail(item, afterTrackingData, ownerContact, ticketLink, state);
+    } else {
+      notification = await sendImplementationUpdatedEmail(item, beforeTrackingData, afterTrackingData, ownerContact, ticketLink);
+    }
+  } catch (error) {
+    notification = {
+      status: "email-failed",
+      detail: error.message || "No se pudo enviar la notificacion.",
+    };
+  }
+
+  return {
+    state: nextState,
+    openItemId,
+    implementationTrackingCreatedAt: item.implementationTrackingCreatedAt,
+    notification,
+  };
+}
+
+function normalizeHeaderKey(header) {
+  return String(header || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findExistingDecisionHeader(headers, candidates = []) {
+  const normalizedCandidates = candidates.map((candidate) => normalizeHeaderKey(candidate)).filter(Boolean);
+  const existingHeaders = Array.isArray(headers) ? headers : [];
+  const exactMatch = existingHeaders.find((header) => normalizedCandidates.includes(normalizeHeaderKey(header)));
+  if (exactMatch) {
+    return exactMatch;
+  }
+  return existingHeaders.find((header) => {
+    const normalizedHeader = normalizeHeaderKey(header);
+    return normalizedCandidates.some((candidate) => (
+      normalizedHeader.includes(candidate) ||
+      candidate.includes(normalizedHeader)
+    ));
+  }) || "";
+}
+
+function getDecisionAggregateHeaderMap(headers = []) {
+  return {
+    strategicAlignment: findExistingDecisionHeader(headers, [
+      "CCB Decision Strategic Alignment Avg",
+      "Strategic Alignment Avg",
+      "Strategic Alignment Score",
+    ]),
+    riskAssessment: findExistingDecisionHeader(headers, [
+      "CCB Decision Risk Assessment Avg",
+      "Risk Assessment Avg",
+      "Risk Assessment Score",
+    ]),
+    resourceImpact: findExistingDecisionHeader(headers, [
+      "CCB Decision Resource Impact Avg",
+      "Resource Impact Avg",
+      "Resource Impact Score",
+    ]),
+    customerValue: findExistingDecisionHeader(headers, [
+      "CCB Decision Customer Value Avg",
+      "Customer Value Avg",
+      "Customer Value Score",
+    ]),
+    operationalFeasibility: findExistingDecisionHeader(headers, [
+      "CCB Decision Operational Feasibility Avg",
+      "Operational Feasibility Avg",
+      "Operational Feasibility Score",
+    ]),
+    total: findExistingDecisionHeader(headers, [
+      "CCB Decision Average Score",
+      "CCB Evaluation Avg",
+      "CCB Eval Avg",
+      "CCB Ev",
+      "Weighted Average Score",
+      "Average Score",
+      "Total",
+    ]),
+    recommendation: findExistingDecisionHeader(headers, [
+      "CCB Decision Recommendation",
+      "CCB Decision Recommend",
+      "Recommendation",
+      "Status",
+      "CCB Status",
+    ]),
+    evaluatorCount: findExistingDecisionHeader(headers, [
+      "CCB Decision Evaluator Count",
+      "CCB Evaluator Count",
+      "Evaluator Count",
+      "Evaluators Count",
+      "CCB Ev Count",
+    ]),
+    lastUpdated: findExistingDecisionHeader(headers, [
+      "CCB Decision Last Updated",
+      "CCB Last Updated",
+      "Last Updated",
+      "Updated At",
+    ]),
+    evaluators: findExistingDecisionHeader(headers, [
+      "CCB Decision Evaluators",
+      "CCB Evaluators",
+      "Evaluators",
+    ]),
+  };
+}
+
+function normalizeDecisionSummary(summary = {}) {
+  return {
+    averageWeightedScore: Number.isFinite(Number(summary.averageWeightedScore))
+      ? Number(summary.averageWeightedScore)
+      : null,
+    recommendation: String(summary.recommendation || "").trim() || "INCOMPLETE",
+    evaluatorCount: Number(summary.evaluatorCount || 0) || 0,
+    criterionAverages: {
+      "strategic-alignment": Number.isFinite(Number(summary.criterionAverages?.["strategic-alignment"]))
+        ? Number(summary.criterionAverages["strategic-alignment"])
+        : null,
+      "risk-assessment": Number.isFinite(Number(summary.criterionAverages?.["risk-assessment"]))
+        ? Number(summary.criterionAverages["risk-assessment"])
+        : null,
+      "resource-impact": Number.isFinite(Number(summary.criterionAverages?.["resource-impact"]))
+        ? Number(summary.criterionAverages["resource-impact"])
+        : null,
+      "customer-value": Number.isFinite(Number(summary.criterionAverages?.["customer-value"]))
+        ? Number(summary.criterionAverages["customer-value"])
+        : null,
+      "operational-feasibility": Number.isFinite(Number(summary.criterionAverages?.["operational-feasibility"]))
+        ? Number(summary.criterionAverages["operational-feasibility"])
+        : null,
+    },
+    lastUpdated: String(summary.lastUpdated || "").trim(),
+    evaluators: Array.isArray(summary.evaluators) ? summary.evaluators : [],
+  };
+}
+
+function hasMeaningfulDecisionSummary(summary = {}) {
+  const normalized = normalizeDecisionSummary(summary);
+  return (
+    (normalized.averageWeightedScore != null && normalized.averageWeightedScore > 0) ||
+    normalized.evaluatorCount > 0 ||
+    normalized.lastUpdated ||
+    normalized.evaluators.length > 0 ||
+    (normalized.recommendation && normalized.recommendation !== "INCOMPLETE") ||
+    Object.values(normalized.criterionAverages).some((value) => value != null)
+  );
+}
+
+function parseDecisionAggregateSummary(record = {}, headers = []) {
+  const headerMap = getDecisionAggregateHeaderMap(headers);
+  const parseNumeric = (value) => {
+    const parsed = Number.parseFloat(String(value || "").trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    averageWeightedScore: parseNumeric(record[headerMap.total]),
+    recommendation: String(record[headerMap.recommendation] || "").trim() || "INCOMPLETE",
+    evaluatorCount: Number.parseInt(String(record[headerMap.evaluatorCount] || "").trim(), 10) || 0,
+    criterionAverages: {
+      "strategic-alignment": parseNumeric(record[headerMap.strategicAlignment]),
+      "risk-assessment": parseNumeric(record[headerMap.riskAssessment]),
+      "resource-impact": parseNumeric(record[headerMap.resourceImpact]),
+      "customer-value": parseNumeric(record[headerMap.customerValue]),
+      "operational-feasibility": parseNumeric(record[headerMap.operationalFeasibility]),
+    },
+    lastUpdated: String(record[headerMap.lastUpdated] || "").trim(),
+    evaluators: String(record[headerMap.evaluators] || "").trim()
+      ? String(record[headerMap.evaluators] || "").split(",").map((value) => String(value || "").trim()).filter(Boolean)
+      : [],
+  };
 }
 
 function parseAreasSheetRows(values) {
@@ -2507,7 +3402,10 @@ function parsePreSessionSheetRows(values) {
 function buildOpenItemsRowsFromState(state, areas) {
   const areaColumns = areas.filter((area) => area.sourceColumn);
   const headers = buildOpenItemHeaders(state, areas);
-  const checkboxHeaders = new Set(areaColumns.map((area) => area.sourceColumn));
+  const checkboxHeaders = new Set([
+    ...areaColumns.map((area) => area.sourceColumn),
+    ...ITL_AREA_HEADERS.filter((header) => headers.includes(header)),
+  ]);
 
   return state.openItems.map((item) => {
     const baseRow = item.rawSheetRow && typeof item.rawSheetRow === "object"
@@ -2526,7 +3424,12 @@ function buildOpenItemsRowsFromState(state, areas) {
     baseRow.Owner = String(item.ownerName || preservedOwner).trim();
     baseRow["Date Created"] = formatMexicoCityDateTime(item.createdAt || baseRow["Date Created"] || "");
     baseRow["Due Date"] = formatMexicoCityDateTime(item.dueDate || baseRow["Due Date"] || "");
-    baseRow.Status = item.status || "open";
+    const preservedImplementationStatus = normalizeImplementationStatus(item.implementationStatus || baseRow.Status || "");
+    if (preservedImplementationStatus) {
+      baseRow.Status = preservedImplementationStatus;
+    } else if (!String(baseRow.Status || "").trim()) {
+      baseRow.Status = item.status || "open";
+    }
     baseRow["Comments/Updates"] = item.description || "";
     baseRow.impactedUsers = tracking.impactedUsers.join(", ");
     baseRow.impactedAreas = tracking.impactedAreas.join(", ");
@@ -2558,10 +3461,20 @@ function buildOpenItemsRowsFromState(state, areas) {
 
     return headers.map((header) => {
       if (checkboxHeaders.has(header)) {
-        if (baseRow[header] === "") {
+        const rawValue = baseRow[header];
+        if (rawValue === "") {
           return "";
         }
-        return Boolean(baseRow[header]);
+        if (typeof rawValue === "string") {
+          const normalized = rawValue.trim().toUpperCase();
+          if (normalized === "TRUE") {
+            return true;
+          }
+          if (normalized === "FALSE") {
+            return false;
+          }
+        }
+        return Boolean(rawValue);
       }
       return String(baseRow[header] || "").trim();
     });
@@ -2666,23 +3579,24 @@ function parseDecisionSheetRows(values) {
 }
 
 function buildDecisionSheetHeaders(existingHeaders = []) {
-  const headerSet = new Set(
-    Array.isArray(existingHeaders) && existingHeaders.length
-      ? existingHeaders
-      : CCB_DECISION_HEADERS,
-  );
-
-  CCB_DECISION_HEADERS.forEach((header) => headerSet.add(header));
-  CCB_DECISION_AGGREGATE_HEADERS.forEach((header) => headerSet.add(header));
-
-  return Array.from(headerSet);
+  if (Array.isArray(existingHeaders) && existingHeaders.length) {
+    return existingHeaders.map((header) => String(header || "").trim());
+  }
+  return [...CCB_DECISION_HEADERS];
 }
 
 function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map(), decisionHeaders = CCB_DECISION_HEADERS) {
+  const headerMap = getDecisionAggregateHeaderMap(decisionHeaders);
   const rows = state.openItems.map((item) => {
     const existingRecord = existingRowsByOpenItemId.get(item.id) || {};
     const baseRecord = {};
-    const ccbDecisionSummary = getOpenItemCcbDecisionSummary(item.id, state);
+    const ccbDecisionSummary = calculateOpenItemCcbDecisionAverages(
+      item.id,
+      state,
+      Array.isArray(state?.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+        ? state.ccbDecisionCriteria
+        : getDefaultCcbDecisionCriteria(),
+    );
 
     decisionHeaders.forEach((header) => {
       baseRecord[header] = String(existingRecord[header] || "").trim();
@@ -2690,18 +3604,41 @@ function buildDecisionSheetRows(state, existingRowsByOpenItemId = new Map(), dec
 
     baseRecord.OI_ID = item.id || "";
     baseRecord["Open Item Description"] = item.title || "";
-    baseRecord["CCB Decision Average Score"] = ccbDecisionSummary?.averageWeightedScore == null ? "" : ccbDecisionSummary.averageWeightedScore;
-    baseRecord["CCB Decision Recommendation"] = ccbDecisionSummary?.recommendation || "INCOMPLETE";
-    baseRecord["CCB Decision Evaluator Count"] = ccbDecisionSummary?.evaluatorCount || 0;
-    baseRecord["CCB Decision Strategic Alignment Avg"] = ccbDecisionSummary?.criterionAverages?.["strategic-alignment"] == null ? "" : ccbDecisionSummary.criterionAverages["strategic-alignment"];
-    baseRecord["CCB Decision Risk Assessment Avg"] = ccbDecisionSummary?.criterionAverages?.["risk-assessment"] == null ? "" : ccbDecisionSummary.criterionAverages["risk-assessment"];
-    baseRecord["CCB Decision Resource Impact Avg"] = ccbDecisionSummary?.criterionAverages?.["resource-impact"] == null ? "" : ccbDecisionSummary.criterionAverages["resource-impact"];
-    baseRecord["CCB Decision Customer Value Avg"] = ccbDecisionSummary?.criterionAverages?.["customer-value"] == null ? "" : ccbDecisionSummary.criterionAverages["customer-value"];
-    baseRecord["CCB Decision Operational Feasibility Avg"] = ccbDecisionSummary?.criterionAverages?.["operational-feasibility"] == null ? "" : ccbDecisionSummary.criterionAverages["operational-feasibility"];
-    baseRecord["CCB Decision Last Updated"] = ccbDecisionSummary?.lastUpdated ? formatMexicoCityDateTime(ccbDecisionSummary.lastUpdated) : "";
-    baseRecord["CCB Decision Evaluators"] = Array.isArray(ccbDecisionSummary?.evaluators) ? ccbDecisionSummary.evaluators.join(", ") : "";
+    if (headerMap.strategicAlignment) {
+      baseRecord[headerMap.strategicAlignment] = ccbDecisionSummary?.criterionAverages?.["strategic-alignment"] == null ? "" : ccbDecisionSummary.criterionAverages["strategic-alignment"];
+    }
+    if (headerMap.riskAssessment) {
+      baseRecord[headerMap.riskAssessment] = ccbDecisionSummary?.criterionAverages?.["risk-assessment"] == null ? "" : ccbDecisionSummary.criterionAverages["risk-assessment"];
+    }
+    if (headerMap.resourceImpact) {
+      baseRecord[headerMap.resourceImpact] = ccbDecisionSummary?.criterionAverages?.["resource-impact"] == null ? "" : ccbDecisionSummary.criterionAverages["resource-impact"];
+    }
+    if (headerMap.customerValue) {
+      baseRecord[headerMap.customerValue] = ccbDecisionSummary?.criterionAverages?.["customer-value"] == null ? "" : ccbDecisionSummary.criterionAverages["customer-value"];
+    }
+    if (headerMap.operationalFeasibility) {
+      baseRecord[headerMap.operationalFeasibility] = ccbDecisionSummary?.criterionAverages?.["operational-feasibility"] == null ? "" : ccbDecisionSummary.criterionAverages["operational-feasibility"];
+    }
+    if (headerMap.total) {
+      baseRecord[headerMap.total] = ccbDecisionSummary?.averageWeightedScore == null ? "" : ccbDecisionSummary.averageWeightedScore;
+    }
+    if (headerMap.recommendation) {
+      baseRecord[headerMap.recommendation] = ccbDecisionSummary?.recommendation || "INCOMPLETE";
+    }
+    if (headerMap.evaluatorCount) {
+      baseRecord[headerMap.evaluatorCount] = ccbDecisionSummary?.evaluatorCount || 0;
+    }
+    if (headerMap.lastUpdated) {
+      baseRecord[headerMap.lastUpdated] = ccbDecisionSummary?.lastUpdated ? formatMexicoCityDateTime(ccbDecisionSummary.lastUpdated) : "";
+    }
+    if (headerMap.evaluators) {
+      baseRecord[headerMap.evaluators] = Array.isArray(ccbDecisionSummary?.evaluators) ? ccbDecisionSummary.evaluators.join(", ") : "";
+    }
 
-    return decisionHeaders.map((header) => baseRecord[header] || "");
+    return decisionHeaders.map((header) => {
+      const value = baseRecord[header];
+      return value == null ? "" : value;
+    });
   });
 
   return [decisionHeaders, ...rows];
@@ -3229,6 +4166,58 @@ async function applyOpenItemsCheckboxValidation(sheetId, headerRow, startRow, en
   }
 }
 
+async function applyExplicitBooleanCells(sheetId, headerRow, startRow, rows, booleanHeaders = []) {
+  if (!sheetId || !Array.isArray(rows) || !rows.length) {
+    return;
+  }
+
+  const requests = [];
+  const headerIndexes = booleanHeaders
+    .map((header) => ({
+      header,
+      index: headerRow.findIndex((value) => String(value || "").trim() === header),
+    }))
+    .filter((entry) => entry.index >= 0);
+
+  rows.forEach((row, rowOffset) => {
+    headerIndexes.forEach((entry) => {
+      const value = row[entry.index];
+      if (value !== true && value !== false) {
+        return;
+      }
+      requests.push({
+        updateCells: {
+          range: {
+            sheetId,
+            startRowIndex: startRow - 1 + rowOffset,
+            endRowIndex: startRow + rowOffset,
+            startColumnIndex: entry.index,
+            endColumnIndex: entry.index + 1,
+          },
+          rows: [
+            {
+              values: [
+                {
+                  userEnteredValue: {
+                    boolValue: value,
+                  },
+                },
+              ],
+            },
+          ],
+          fields: "userEnteredValue",
+        },
+      });
+    });
+  });
+
+  if (!requests.length) {
+    return;
+  }
+
+  await batchUpdateSpreadsheet(requests);
+}
+
 function getSheetMetadataByName(metadata, sheetName) {
   return Array.isArray(metadata?.sheets)
     ? metadata.sheets.find((sheet) => sheet.properties?.title === sheetName) || null
@@ -3403,7 +4392,8 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
     new Set(
       (state.areas || [])
         .map((area) => String(area?.sourceColumn || "").trim())
-        .filter(Boolean),
+        .filter(Boolean)
+        .concat(ITL_AREA_HEADERS),
     ),
   );
   const headerWidth = Math.max(context.headerRow.length, desiredHeaders.length, rows.reduce((max, row) => Math.max(max, row.length), 0));
@@ -3449,6 +4439,7 @@ async function writeOpenItemsSheetPreservingTemplate(rows, state) {
     const writeRange = `${SOURCE_SHEET_NAME}!A${startRow}:${endColumn}${startRow + nextRows.length - 1}`;
     await writeSheetRange(writeRange, nextRows, "USER_ENTERED");
   }
+  await applyExplicitBooleanCells(sheetId, context.headerRow, startRow, nextRows, ITL_AREA_HEADERS);
 
   await batchUpdateSpreadsheet(formulaCopyRequests);
   const tableResizeRequest = buildTableResizeRequest(matchedSheet, context.headerRowIndex + 1 + rows.length, desiredHeaders.length);
@@ -3578,9 +4569,11 @@ async function loadStateFromGoogleSheets() {
     })),
   };
 
-  const state = mapSnapshotToState(snapshot, null, effectiveAreas, votesMap, preSessionChecksMap);
+  const localState = loadState();
+  const state = mapSnapshotToState(snapshot, localState, effectiveAreas, votesMap, preSessionChecksMap);
   state.ccbDecisionCriteria = ccbDecisionCriteria;
   state.ccbEvaluations = ccbEvaluations;
+  const decisionSheet = decisionValues.length ? parseDecisionSheetRows(decisionValues) : { context: { headerRow: [] }, rowsByOpenItemId: new Map() };
   state.openItems.forEach((item) => {
     const tracking = deriveOpenItemTracking(state, item);
     item.impactedAreaIds = tracking.impactedAreaIds;
@@ -3590,6 +4583,27 @@ async function loadStateFromGoogleSheets() {
     item.voteParticipants = tracking.voteParticipants;
     item.pendingEvaluators = tracking.pendingEvaluators;
     item.lastEvaluationDate = tracking.lastEvaluationDate;
+    const recalculatedSummary = calculateOpenItemCcbDecisionAverages(
+      item.id,
+      state,
+      state.ccbDecisionCriteria,
+    );
+    if (recalculatedSummary.evaluatorCount > 0) {
+      updateOpenItemCcbDecision(item.id, recalculatedSummary, state);
+      return;
+    }
+    const existingDecisionRecord = decisionSheet.rowsByOpenItemId.get(item.id);
+    if (existingDecisionRecord) {
+      const summaryFromDecisionSheet = parseDecisionAggregateSummary(
+        existingDecisionRecord,
+        decisionSheet.context.headerRow,
+      );
+      const hasPersistedAggregate = hasMeaningfulDecisionSummary(summaryFromDecisionSheet);
+      if (hasPersistedAggregate) {
+        updateOpenItemCcbDecision(item.id, summaryFromDecisionSheet, state);
+        return;
+      }
+    }
     updateOpenItemCcbDecision(item.id, null, state);
   });
   state.source = {
@@ -3764,8 +4778,16 @@ function sanitizeState(input) {
           ccbDecisionEvaluators: Array.isArray(item.ccbDecisionEvaluators) ? item.ccbDecisionEvaluators.map((value) => String(value || "").trim()).filter(Boolean) : [],
           isSubstantial: Boolean(item.isSubstantial),
           status: item.status || "open",
+          implementationStatus: normalizeImplementationStatus(item.implementationStatus || ""),
           createdAt: item.createdAt || new Date().toISOString(),
           dueDate: item.dueDate || "",
+          minutesRelated: item.minutesRelated || "",
+          gitRepository: item.gitRepository || "",
+          jiraTicketsRelated: item.jiraTicketsRelated || "",
+          branchLocation: String(item.branchLocation || "").trim(),
+          implementationNotes: String(item.implementationNotes || "").trim(),
+          implementationTrackingCreatedAt: String(item.implementationTrackingCreatedAt || "").trim(),
+          implementationApprovalDate: String(item.implementationApprovalDate || "").trim(),
           externalStatus: item.externalStatus || "",
           ccbScore: item.ccbScore || "",
           rawSheetRow: item.rawSheetRow || null,
@@ -4090,6 +5112,18 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && pathname === "/api/change-manager/tracking/save") {
+      const body = await parseBody(request);
+      const user = getCurrentUser(request);
+      if (!isChangeManagerUser(user)) {
+        sendJson(response, 403, { error: "Not authorized" });
+        return;
+      }
+      const result = await saveImplementationTracking(String(body.openItemId || "").trim(), user, body);
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (request.method === "POST" && pathname === "/api/state") {
       const body = await parseBody(request);
       const nextState = await persistStateStore(sanitizeState(body));
@@ -4107,12 +5141,25 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && pathname === "/api/reset") {
+      const user = getCurrentUser(request);
+      if (!isAdminUser(user)) {
+        sendJson(response, 403, { error: "Not authorized" });
+        return;
+      }
       const nextState = await persistStateStore(createDefaultState());
       sendJson(response, 200, {
         state: nextState,
         prerequisite: derivePrerequisiteStatus(nextState),
         dailyReport: buildDailyReport(nextState),
       });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/votes/save") {
+      const body = await parseBody(request);
+      const user = getCurrentUser(request);
+      const result = await saveOpenItemVote(String(body.openItemId || "").trim(), user, body);
+      sendJson(response, 200, result);
       return;
     }
 
