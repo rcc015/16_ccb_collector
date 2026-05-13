@@ -590,6 +590,48 @@ function getDefaultCcbDecisionCriteria() {
   }));
 }
 
+function normalizeCriterionScoringGuide(scoringGuide = [], fallbackGuide = []) {
+  const normalized = (Array.isArray(scoringGuide) ? scoringGuide : [])
+    .map((entry) => {
+      if (entry && typeof entry === "object") {
+        const score = Number(entry.score);
+        const label = String(entry.label || "").trim();
+        return Number.isInteger(score) && label ? { score, label } : null;
+      }
+
+      if (typeof entry === "string") {
+        const match = entry.match(/^\s*(\d+)\s*=\s*(.+)\s*$/);
+        if (match) {
+          return { score: Number(match[1]), label: String(match[2] || "").trim() };
+        }
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+
+  return normalized.length
+    ? normalized
+    : (Array.isArray(fallbackGuide) ? fallbackGuide.map((entry) => ({ ...entry })) : []);
+}
+
+function normalizeDecisionCriterion(criterion, fallbackCriterion = {}) {
+  const fallback = fallbackCriterion || {};
+  const criterionId = String(criterion?.id || fallback.id || slugifyCriterion(criterion?.name || fallback.name || "")).trim();
+  return {
+    id: criterionId,
+    name: String(criterion?.name || fallback.name || criterionId).trim(),
+    weight: Number.isFinite(Number(criterion?.weight)) && Number(criterion.weight) > 0
+      ? Number(criterion.weight)
+      : Number(fallback.weight || 0),
+    note: String(criterion?.note || fallback.note || "").trim(),
+    factors: Array.isArray(criterion?.factors) && criterion.factors.length
+      ? criterion.factors.map((factor) => String(factor || "").trim()).filter(Boolean)
+      : Array.isArray(fallback.factors) ? fallback.factors.map((factor) => String(factor || "").trim()).filter(Boolean) : [],
+    scoringGuide: normalizeCriterionScoringGuide(criterion?.scoringGuide, fallback.scoringGuide),
+  };
+}
+
 function loadCcbDecisionCriteria(decisionSheetValues = []) {
   const defaults = getDefaultCcbDecisionCriteria();
   let context = null;
@@ -612,7 +654,7 @@ function loadCcbDecisionCriteria(decisionSheetValues = []) {
   return defaults.filter((criterion) => {
     const normalizedName = String(criterion.name || "").trim().toLowerCase();
     return availableCriteria.some((entry) => entry.trim().toLowerCase() === normalizedName);
-  });
+  }).map((criterion) => normalizeDecisionCriterion(criterion, criterion));
 }
 
 function calculateWeightedScore(evaluationEntries = [], criteria = getDefaultCcbDecisionCriteria()) {
@@ -4816,19 +4858,12 @@ function sanitizeState(input) {
         }))
       : [],
     ccbDecisionCriteria: Array.isArray(input.ccbDecisionCriteria) && input.ccbDecisionCriteria.length
-      ? input.ccbDecisionCriteria.map((criterion) => ({
-          id: String(criterion.id || slugifyCriterion(criterion.name)).trim(),
-          name: String(criterion.name || "").trim(),
-          weight: Number(criterion.weight || 0),
-          note: String(criterion.note || "").trim(),
-          factors: Array.isArray(criterion.factors) ? criterion.factors.map((factor) => String(factor || "").trim()).filter(Boolean) : [],
-          scoringGuide: Array.isArray(criterion.scoringGuide)
-            ? criterion.scoringGuide.map((entry) => ({
-                score: Number(entry.score || 0),
-                label: String(entry.label || "").trim(),
-              })).filter((entry) => entry.score && entry.label)
-            : [],
-        }))
+      ? input.ccbDecisionCriteria.map((criterion) => normalizeDecisionCriterion(
+          criterion,
+          getDefaultCcbDecisionCriteria().find((fallback) => fallback.id === String(criterion?.id || "").trim())
+            || getDefaultCcbDecisionCriteria().find((fallback) => fallback.name === String(criterion?.name || "").trim())
+            || {},
+        ))
       : getDefaultCcbDecisionCriteria(),
     ccbEvaluations: Array.isArray(input.ccbEvaluations)
       ? input.ccbEvaluations.map((evaluation) => ({

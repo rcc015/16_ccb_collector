@@ -30,6 +30,7 @@ const summaryCriticalItems = document.getElementById("summary-critical-items");
 const summaryCriticalActions = document.getElementById("summary-critical-actions");
 const summaryTrends = document.getElementById("summary-trends");
 const sourceStatusPill = document.getElementById("source-status-pill");
+const saveStatusPill = document.getElementById("save-status-pill");
 const governanceSettingsDrawer = document.getElementById("governance-settings-drawer");
 const openItemTemplate = document.getElementById("open-item-template");
 const changeManagerTabButton = document.getElementById("change-manager-tab-button");
@@ -104,7 +105,7 @@ const CCB_FRAMEWORK = [
     weight: 0.3,
     note: "Strategic Alignment must score >=4 for approval.",
     factors: ["Supports product roadmap", "Advances business goals", "Enhances competitive position"],
-    scoringGuide: ["1 = Misaligned", "3 = Neutral", "5 = Fully aligned"],
+    scoringGuide: [{ score: 1, label: "Not aligned" }, { score: 3, label: "Neutral" }, { score: 5, label: "Fully aligned" }],
   },
   {
     id: "risk-assessment",
@@ -112,7 +113,7 @@ const CCB_FRAMEWORK = [
     weight: 0.25,
     note: "Reject if safety/compliance risk >3.",
     factors: ["Technical complexity", "Safety/compliance risks", "Customer impact if failed"],
-    scoringGuide: ["1 = High risk", "3 = Moderate", "5 = Low risk"],
+    scoringGuide: [{ score: 1, label: "High risk" }, { score: 3, label: "Moderate" }, { score: 5, label: "Low risk" }],
   },
   {
     id: "resource-impact",
@@ -120,7 +121,7 @@ const CCB_FRAMEWORK = [
     weight: 0.2,
     note: "Flag if score <=2.",
     factors: ["Engineering hours", "Cost (dev, testing, rollout)", "Timeline disruption"],
-    scoringGuide: ["1 = Major impact, >20% budget/timeline", "5 = Minimal impact, <5%"],
+    scoringGuide: [{ score: 1, label: "Major impact, >20% budget/timeline" }, { score: 3, label: "Moderate impact" }, { score: 5, label: "Minimal impact, <5%" }],
   },
   {
     id: "customer-value",
@@ -128,7 +129,7 @@ const CCB_FRAMEWORK = [
     weight: 0.15,
     note: "Requires supporting data.",
     factors: ["Solves critical pain points", "Expected adoption/upsell", "CSAT/NPS impact"],
-    scoringGuide: ["1 = Low value", "5 = High value / churn reduction"],
+    scoringGuide: [{ score: 1, label: "Low value" }, { score: 3, label: "Moderate value" }, { score: 5, label: "High value / churn reduction" }],
   },
   {
     id: "operational-feasibility",
@@ -136,7 +137,7 @@ const CCB_FRAMEWORK = [
     weight: 0.1,
     note: "Ease of execution and supportability.",
     factors: ["Ease of implementation", "Maintenance burden", "Supplier/partner readiness"],
-    scoringGuide: ["1 = Not feasible", "5 = Easily executable"],
+    scoringGuide: [{ score: 1, label: "Not feasible" }, { score: 3, label: "Manageable" }, { score: 5, label: "Easily executable" }],
   },
 ];
 
@@ -160,7 +161,12 @@ let selectedChangeManagerOpenItemId = "";
 let openItemsSearchQuery = "";
 let openItemsSearchDebounceId = null;
 let openItemsSearchPanelOpen = false;
+let openItemsSearchActiveIndex = -1;
 let highlightedOpenItemId = "";
+let forcedVisibleOpenItemId = "";
+let pendingScrollOpenItemId = "";
+let pendingNavigationOpenItemId = "";
+let isStateLoaded = false;
 let selectedSummaryKpiFilter = "all";
 let selectedSummaryRiskCell = "";
 const openItemDetailTabById = new Map();
@@ -192,6 +198,21 @@ function normalizeOpenItemId(value) {
   return String(value || "").trim().toUpperCase();
 }
 
+function setSelectedOpenItemId(openItemId) {
+  selectedOpenItemId = normalizeOpenItemId(openItemId);
+}
+
+function setForcedVisibleOpenItemId(openItemId) {
+  forcedVisibleOpenItemId = normalizeOpenItemId(openItemId);
+}
+
+function setSearchPanelOpen(isOpen) {
+  openItemsSearchPanelOpen = Boolean(isOpen);
+  if (!openItemsSearchPanelOpen) {
+    openItemsSearchActiveIndex = -1;
+  }
+}
+
 function normalizeTabId(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "openitems" || normalized === "open-items") {
@@ -211,7 +232,8 @@ function applyDeepLinkFromUrl() {
 
   if (deepLinkState.openItemId) {
     selectedPreSessionJobOpenItemId = deepLinkState.openItemId;
-    selectedOpenItemId = deepLinkState.openItemId;
+    setSelectedOpenItemId(deepLinkState.openItemId);
+    pendingNavigationOpenItemId = deepLinkState.openItemId;
   }
 }
 
@@ -453,10 +475,97 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function logCriterionWarning(criterionId, message, payload) {
+  console.warn(`[CCB Collector] Malformed evaluation template for "${criterionId}": ${message}`, payload);
+}
+
+function normalizeCriterionScoringGuide(criterionId, scoringGuide, fallbackGuide) {
+  const entries = Array.isArray(scoringGuide) ? scoringGuide : [];
+  const normalized = entries
+    .map((entry) => {
+      if (entry && typeof entry === "object") {
+        const score = Number(entry.score);
+        const label = String(entry.label || "").trim();
+        if (Number.isInteger(score) && label) {
+          return { score, label };
+        }
+        logCriterionWarning(criterionId, "invalid scoring guide object entry", entry);
+        return null;
+      }
+
+      if (typeof entry === "string") {
+        const match = entry.match(/^\s*(\d+)\s*=\s*(.+)\s*$/);
+        if (match) {
+          return { score: Number(match[1]), label: String(match[2] || "").trim() };
+        }
+        logCriterionWarning(criterionId, "could not parse scoring guide string", entry);
+        return null;
+      }
+
+      logCriterionWarning(criterionId, "unsupported scoring guide entry type", entry);
+      return null;
+    })
+    .filter(Boolean);
+
+  if (normalized.length) {
+    return normalized;
+  }
+
+  if (Array.isArray(scoringGuide) && scoringGuide.length) {
+    logCriterionWarning(criterionId, "falling back to default scoring guide", scoringGuide);
+  }
+  return Array.isArray(fallbackGuide) ? fallbackGuide.map((entry) => ({ ...entry })) : [];
+}
+
+function normalizeDecisionCriterion(rawCriterion, fallbackCriterion) {
+  const source = rawCriterion && typeof rawCriterion === "object" ? rawCriterion : {};
+  const fallback = fallbackCriterion && typeof fallbackCriterion === "object" ? fallbackCriterion : {};
+  const criterionId = String(source.id || fallback.id || "").trim() || slugify(String(source.name || fallback.name || ""));
+  const normalized = {
+    id: criterionId,
+    name: String(source.name || fallback.name || criterionId).trim(),
+    weight: Number.isFinite(Number(source.weight)) && Number(source.weight) > 0 ? Number(source.weight) : Number(fallback.weight || 0),
+    note: String(source.note || fallback.note || "").trim(),
+    factors: Array.isArray(source.factors) && source.factors.length
+      ? source.factors.map((factor) => String(factor || "").trim()).filter(Boolean)
+      : Array.isArray(fallback.factors) ? fallback.factors.map((factor) => String(factor || "").trim()).filter(Boolean) : [],
+    scoringGuide: normalizeCriterionScoringGuide(
+      criterionId,
+      source.scoringGuide,
+      Array.isArray(fallback.scoringGuide) ? fallback.scoringGuide : [],
+    ),
+  };
+
+  if (!normalized.name) {
+    logCriterionWarning(criterionId || "unknown", "criterion name missing, using fallback", rawCriterion);
+    normalized.name = String(fallback.name || criterionId || "Unnamed criterion");
+  }
+
+  if (!normalized.weight) {
+    logCriterionWarning(criterionId || normalized.name, "criterion weight missing, using fallback/default", rawCriterion);
+  }
+
+  return normalized;
+}
+
 function loadCcbDecisionCriteria() {
-  return Array.isArray(state.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
+  const fallbackById = new Map(CCB_FRAMEWORK.map((criterion) => [criterion.id, criterion]));
+  const sourceCriteria = Array.isArray(state.ccbDecisionCriteria) && state.ccbDecisionCriteria.length
     ? state.ccbDecisionCriteria
     : CCB_FRAMEWORK;
+
+  const normalized = sourceCriteria
+    .map((criterion) => normalizeDecisionCriterion(
+      criterion,
+      fallbackById.get(String(criterion?.id || "").trim()) || fallbackById.get(slugify(String(criterion?.name || ""))),
+    ))
+    .filter((criterion) => criterion.id);
+
+  if (!normalized.length) {
+    return CCB_FRAMEWORK.map((criterion) => normalizeDecisionCriterion(criterion, criterion));
+  }
+
+  return normalized;
 }
 
 function getCurrentEvaluator() {
@@ -674,6 +783,32 @@ function renderSourceStatus() {
     `<div><strong>Ultima carga:</strong> ${formatDateTime(importedAt)}</div>`,
     `<div><strong>Ultimo guardado:</strong> ${formatDateTime(state.lastSavedAt)}</div>`,
   ].join("");
+}
+
+function renderHeaderStatusPills() {
+  const source = state.source || {};
+  const sourceType = source.type || "local";
+  const sourceLabel = sourceType === "google-sheets"
+    ? "Google Sheets synced"
+    : sourceType === "google-sheet-snapshot"
+      ? "Snapshot loaded"
+      : "Local mode";
+
+  if (sourceStatusPill) {
+    sourceStatusPill.dataset.mode = sourceType;
+    sourceStatusPill.innerHTML = `
+      <strong>${escapeHtml(sourceLabel)}</strong>
+      <span>${escapeHtml(formatDateTime(source.importedAt || state.lastSavedAt))}</span>
+    `;
+  }
+
+  if (saveStatusPill) {
+    saveStatusPill.dataset.status = state.lastSavedAt ? "clear" : "review";
+    saveStatusPill.innerHTML = `
+      <strong>${state.lastSavedAt ? "Saved" : "Unsaved"}</strong>
+      <span>${escapeHtml(state.lastSavedAt ? formatDateTime(state.lastSavedAt) : "Pending local changes")}</span>
+    `;
+  }
 }
 
 function renderReferencePanels() {
@@ -961,11 +1096,132 @@ function getGlobalOpenItemSearchResults() {
       ].join(" ").toLowerCase();
       return searchableText.includes(normalizedQuery);
     })
-    .slice(0, 8);
+    .sort((left, right) => normalizeOpenItemId(left.id).localeCompare(normalizeOpenItemId(right.id)));
 }
 
 function closeOpenItemSearchPanel() {
-  openItemsSearchPanelOpen = false;
+  setSearchPanelOpen(false);
+}
+
+function syncOpenItemSearchActiveIndex(searchResults, preferredOpenItemId = "") {
+  if (!Array.isArray(searchResults) || !searchResults.length) {
+    openItemsSearchActiveIndex = -1;
+    return;
+  }
+
+  const normalizedPreferredId = normalizeOpenItemId(preferredOpenItemId);
+  const normalizedSelectedId = normalizeOpenItemId(selectedOpenItemId);
+  const currentActiveItem = searchResults[openItemsSearchActiveIndex] || null;
+  const normalizedCurrentActiveId = normalizeOpenItemId(currentActiveItem?.id);
+  const preferredIndex = normalizedPreferredId
+    ? searchResults.findIndex((item) => normalizeOpenItemId(item.id) === normalizedPreferredId)
+    : -1;
+
+  if (preferredIndex >= 0) {
+    openItemsSearchActiveIndex = preferredIndex;
+    return;
+  }
+
+  if (normalizedCurrentActiveId && searchResults.some((item) => normalizeOpenItemId(item.id) === normalizedCurrentActiveId)) {
+    return;
+  }
+
+  const selectedIndex = normalizedSelectedId
+    ? searchResults.findIndex((item) => normalizeOpenItemId(item.id) === normalizedSelectedId)
+    : -1;
+  openItemsSearchActiveIndex = selectedIndex >= 0 ? selectedIndex : 0;
+}
+
+function scrollToOpenItemCard(openItemId, attempt = 0) {
+  const normalizedId = normalizeOpenItemId(openItemId);
+  if (!normalizedId) {
+    return;
+  }
+  const target = document.getElementById(`open-item-${normalizedId}`);
+  if (target) {
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    pendingScrollOpenItemId = "";
+    return;
+  }
+  if (attempt >= 10) {
+    pendingScrollOpenItemId = "";
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    scrollToOpenItemCard(normalizedId, attempt + 1);
+  });
+}
+
+function appendUniqueOpenItem(items, candidateItem) {
+  if (!candidateItem) {
+    return Array.isArray(items) ? [...items] : [];
+  }
+  const normalizedCandidateId = normalizeOpenItemId(candidateItem.id);
+  const nextItems = Array.isArray(items) ? [...items] : [];
+  if (!nextItems.some((item) => normalizeOpenItemId(item.id) === normalizedCandidateId)) {
+    nextItems.push(candidateItem);
+  }
+  return nextItems;
+}
+
+function updateOpenItemDeepLink(id) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("tab", "openItems");
+  url.searchParams.set("openItemId", id);
+  window.history.replaceState({}, document.title, url.toString());
+  deepLinkState.tab = "items";
+  deepLinkState.openItemId = id;
+}
+
+function navigateToOpenItem(rawId) {
+  const id = normalizeOpenItemId(rawId);
+  if (!id) {
+    return;
+  }
+
+  console.log("Navigating to Open Item", id);
+
+  setSelectedOpenItemId(id);
+  setForcedVisibleOpenItemId(id);
+  pendingScrollOpenItemId = id;
+  openItemsSearchQuery = "";
+  setSearchPanelOpen(false);
+  activateTab("items");
+  console.log("Active tab set to", "items");
+  renderHeaderOpenItemSearch();
+  updateOpenItemDeepLink(id);
+
+  if (!isStateLoaded || !state.openItems.length) {
+    pendingNavigationOpenItemId = id;
+    return;
+  }
+
+  const targetItem = state.openItems.find((item) => normalizeOpenItemId(item.id) === id);
+  if (!targetItem) {
+    pendingNavigationOpenItemId = id;
+    console.warn("Open Item not found in loaded state:", id);
+    return;
+  }
+
+  renderOpenItems();
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-open-item-id="${id}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        highlightedOpenItemId = id;
+        el.classList.add("open-item-highlight");
+        window.setTimeout(() => {
+          el.classList.remove("open-item-highlight");
+          highlightedOpenItemId = "";
+          renderOpenItems();
+        }, 1800);
+      } else {
+        console.warn("Open Item element not found after navigation:", id);
+      }
+    });
+  });
 }
 
 function renderHeaderOpenItemSearch() {
@@ -973,6 +1229,7 @@ function renderHeaderOpenItemSearch() {
     return;
   }
   const searchResults = getGlobalOpenItemSearchResults();
+  syncOpenItemSearchActiveIndex(searchResults);
   const showSuggestionPanel = openItemsSearchPanelOpen && searchResults.length > 0;
   headerOpenItemSearch.hidden = false;
   headerOpenItemSearch.innerHTML = `
@@ -991,14 +1248,15 @@ function renderHeaderOpenItemSearch() {
       ` : ""}
       ${showSuggestionPanel ? `
         <div class="open-items-search-suggestions">
-          ${searchResults.map((item) => `
+          ${searchResults.map((item, index) => `
             <button
               type="button"
-              class="open-items-search-suggestion"
+              class="open-items-search-suggestion${index === openItemsSearchActiveIndex ? " is-active" : ""}"
               data-open-item-search-select="${escapeHtml(item.id)}"
+              data-open-item-search-index="${index}"
             >
               <div class="open-items-search-suggestion-top">
-                <strong>${escapeHtml(item.id)}</strong>
+                <strong>⌘ ${escapeHtml(item.id)}</strong>
                 <span class="decision-pill" data-decision="${escapeHtml(String((getEvaluationSummary(item).recommendation || item.externalStatus || "incomplete")).toLowerCase())}">${escapeHtml(getEvaluationSummary(item).recommendation || item.externalStatus || "INCOMPLETE")}</span>
               </div>
               <span>${escapeHtml(item.title)}</span>
@@ -1013,10 +1271,18 @@ function renderHeaderOpenItemSearch() {
   const searchField = headerOpenItemSearch.querySelector("#open-items-ticket-search");
   const clearButton = headerOpenItemSearch.querySelector("[data-open-item-search-clear]");
   const resultButtons = headerOpenItemSearch.querySelectorAll("[data-open-item-search-select]");
+  const activeResultButton = headerOpenItemSearch.querySelector(".open-items-search-suggestion.is-active");
+
+  if (activeResultButton) {
+    window.requestAnimationFrame(() => {
+      activeResultButton.scrollIntoView({ block: "nearest" });
+    });
+  }
 
   searchField?.addEventListener("input", (event) => {
     const nextQuery = event.target.value || "";
     openItemsSearchQuery = nextQuery;
+    openItemsSearchActiveIndex = -1;
     if (nextQuery.trim().length < 2) {
       closeOpenItemSearchPanel();
       window.clearTimeout(openItemsSearchDebounceId);
@@ -1028,7 +1294,9 @@ function renderHeaderOpenItemSearch() {
     }
     window.clearTimeout(openItemsSearchDebounceId);
     openItemsSearchDebounceId = window.setTimeout(() => {
-      openItemsSearchPanelOpen = getGlobalOpenItemSearchResults().length > 0;
+      const results = getGlobalOpenItemSearchResults();
+      openItemsSearchPanelOpen = results.length > 0;
+      syncOpenItemSearchActiveIndex(results);
       renderHeaderOpenItemSearch();
       const field = headerOpenItemSearch.querySelector("#open-items-ticket-search");
       if (field) {
@@ -1038,7 +1306,41 @@ function renderHeaderOpenItemSearch() {
     }, 260);
   });
 
+  searchField?.addEventListener("focus", () => {
+    const results = getGlobalOpenItemSearchResults();
+    if (results.length && !openItemsSearchPanelOpen) {
+      openItemsSearchPanelOpen = true;
+      syncOpenItemSearchActiveIndex(results);
+      renderHeaderOpenItemSearch();
+      headerOpenItemSearch.querySelector("#open-items-ticket-search")?.focus();
+    }
+  });
+
   searchField?.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const results = getGlobalOpenItemSearchResults();
+      if (!results.length) {
+        return;
+      }
+      event.preventDefault();
+      openItemsSearchPanelOpen = true;
+      if (event.key === "ArrowDown") {
+        openItemsSearchActiveIndex = openItemsSearchActiveIndex < 0 ? 0 : (openItemsSearchActiveIndex + 1) % results.length;
+      } else {
+        openItemsSearchActiveIndex = openItemsSearchActiveIndex <= 0 ? results.length - 1 : openItemsSearchActiveIndex - 1;
+      }
+      renderHeaderOpenItemSearch();
+      headerOpenItemSearch.querySelector("#open-items-ticket-search")?.focus();
+      return;
+    }
+    if (event.key === "Enter") {
+      const results = getGlobalOpenItemSearchResults();
+      if (openItemsSearchPanelOpen && results[openItemsSearchActiveIndex]) {
+        event.preventDefault();
+        navigateToOpenItem(results[openItemsSearchActiveIndex].id);
+      }
+      return;
+    }
     if (event.key === "Escape") {
       closeOpenItemSearchPanel();
       renderHeaderOpenItemSearch();
@@ -1054,8 +1356,17 @@ function renderHeaderOpenItemSearch() {
   });
 
   resultButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      handleFindTicketSelect(button.dataset.openItemSearchSelect || "");
+    button.addEventListener("mouseenter", () => {
+      const nextIndex = Number(button.dataset.openItemSearchIndex || -1);
+      if (nextIndex === openItemsSearchActiveIndex) {
+        return;
+      }
+      openItemsSearchActiveIndex = nextIndex;
+      renderHeaderOpenItemSearch();
+    });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      navigateToOpenItem(button.dataset.openItemSearchSelect || "");
     });
   });
 }
@@ -1820,14 +2131,7 @@ function renderSummaryRiskDetail(model) {
 
   summaryRiskDetail.querySelectorAll("[data-open-item-nav]").forEach((button) => {
     button.addEventListener("click", () => {
-      const openItemId = button.dataset.openItemNav || "";
-      const openItem = state.openItems.find((candidate) => candidate.id === openItemId);
-      if (!openItem) return;
-      selectedOpenItemsImpactTab = isPrivilegedOpenItemsViewer() ? "all" : (getOpenItemImpactContext(openItem).impactingMe ? "impacting" : "not-impacting");
-      selectedOpenItemsStatusTab = String(openItem.externalStatus || "NEW").trim().toUpperCase() || "NEW";
-      selectedOpenItemId = openItemId;
-      activateTab("items");
-      renderOpenItems();
+      navigateToOpenItem(button.dataset.openItemNav || "");
     });
   });
 }
@@ -1836,7 +2140,7 @@ function renderSummaryDashboard(prerequisite) {
   const model = getGovernanceDashboardModel(prerequisite);
 
   dailyReport.dataset.copyText = buildExecutiveSummaryText(model);
-  sourceStatusPill.textContent = `Google Sheets synced · Last saved ${formatDateTime(state.lastSavedAt)}`;
+  renderHeaderStatusPills();
   sourceStatus.hidden = !summarySourceExpanded;
   const trendsToggle = document.getElementById("summary-trends-toggle");
   if (trendsToggle) {
@@ -2000,31 +2304,33 @@ function getOpenItemEditMode(openItemId) {
 }
 
 function handleFindTicketSelect(openItemId) {
-  const normalizedOpenItemId = normalizeOpenItemId(openItemId);
-  const targetItem = state.openItems.find((item) => normalizeOpenItemId(item.id) === normalizedOpenItemId);
-  if (!targetItem) {
-    return;
-  }
-  activateTab("items");
-  selectedOpenItemsImpactTab = isPrivilegedOpenItemsViewer()
-    ? "all"
-    : (getOpenItemImpactContext(targetItem).impactingMe ? "impacting" : "not-impacting");
-  selectedOpenItemsStatusTab = String(targetItem.externalStatus || "NEW").trim().toUpperCase() || "NEW";
-  selectedOpenItemId = targetItem.id;
-  closeOpenItemSearchPanel();
-  highlightedOpenItemId = targetItem.id;
-  renderHeaderOpenItemSearch();
-  renderOpenItems();
-  window.requestAnimationFrame(() => {
-    const target = document.getElementById(`open-item-detail-${targetItem.id}`);
-    if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+  navigateToOpenItem(openItemId);
+}
+
+function normalizeOpenItemStatusesForAdmin() {
+  let changed = 0;
+  state.openItems.forEach((item) => {
+    const originalExternal = String(item.externalStatus || "").trim();
+    const normalizedExternal = originalExternal.toUpperCase();
+    const nextExternal = normalizedExternal === "APPROVE" ? "APPROVED"
+      : normalizedExternal === "REJECT" ? "REJECTED"
+      : normalizedExternal === "DEFERRED" ? "NEW"
+      : normalizedExternal;
+    if (nextExternal && nextExternal !== originalExternal) {
+      item.externalStatus = nextExternal;
+      changed += 1;
     }
-    window.setTimeout(() => {
-      highlightedOpenItemId = "";
-      renderOpenItems();
-    }, 1800);
+
+    const originalStatus = String(item.status || "").trim().toLowerCase();
+    const nextStatus = ["open", "deferred", "closed"].includes(originalStatus)
+      ? originalStatus
+      : (nextExternal === "REJECTED" ? "closed" : "open");
+    if (nextStatus !== originalStatus) {
+      item.status = nextStatus;
+      changed += 1;
+    }
   });
+  return changed;
 }
 
 function getOpenItemActivityModel(item) {
@@ -2062,6 +2368,8 @@ function renderOpenItems() {
   openItemsList.innerHTML = "";
   renderHeaderOpenItemSearch();
 
+  const normalizedForcedOpenItemId = normalizeOpenItemId(forcedVisibleOpenItemId);
+
   const allActiveItems = state.openItems
     .filter((item) => item.status !== "closed")
     .slice()
@@ -2087,12 +2395,15 @@ function renderOpenItems() {
   if (!impactTabs.some((tab) => tab.id === selectedOpenItemsImpactTab)) {
     selectedOpenItemsImpactTab = "impacting";
   }
+  const forcedItem = normalizedForcedOpenItemId
+    ? allActiveItems.find((item) => normalizeOpenItemId(item.id) === normalizedForcedOpenItemId) || null
+    : null;
   const selectedImpactTab = impactTabs.find((tab) => tab.id === selectedOpenItemsImpactTab) || impactTabs[0];
-  const activeItems = selectedImpactTab?.items || [];
+  const activeItems = appendUniqueOpenItem(selectedImpactTab?.items || [], forcedItem);
   const groupedItems = {
-    NEW: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "NEW"),
-    APPROVED: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "APPROVED"),
-    REJECTED: activeItems.filter((item) => String(item.externalStatus || "").trim().toUpperCase() === "REJECTED"),
+    NEW: activeItems.filter((item) => String(item.externalStatus || "NEW").trim().toUpperCase() === "NEW"),
+    APPROVED: activeItems.filter((item) => String(item.externalStatus || "NEW").trim().toUpperCase() === "APPROVED"),
+    REJECTED: activeItems.filter((item) => String(item.externalStatus || "NEW").trim().toUpperCase() === "REJECTED"),
   };
 
   const availableStatusTabs = Object.entries(groupedItems).filter(([, items]) => items.length > 0);
@@ -2121,22 +2432,21 @@ function renderOpenItems() {
   const visibleStatusItems = normalizedTicketSearch
     ? selectedStatusItems.filter(matchesTicketSearch)
     : selectedStatusItems;
-  const forcedLinkedItem = deepLinkState.openItemId
-    ? allActiveItems.find((item) => normalizeOpenItemId(item.id) === normalizeOpenItemId(deepLinkState.openItemId)) || null
-    : null;
-  const effectiveStatusItems = forcedLinkedItem ? [forcedLinkedItem] : selectedStatusItems;
-  const effectiveVisibleItems = forcedLinkedItem ? [forcedLinkedItem] : visibleStatusItems;
-  if (effectiveStatusItems.length && !effectiveStatusItems.some((item) => item.id === selectedOpenItemId)) {
-    selectedOpenItemId = effectiveStatusItems[0].id;
-  }
-  if (!effectiveStatusItems.length) {
+  const exactForcedItem = forcedItem || null;
+  const effectiveStatusItems = appendUniqueOpenItem(selectedStatusItems, exactForcedItem);
+  const effectiveVisibleItems = appendUniqueOpenItem(visibleStatusItems, exactForcedItem);
+  const normalizedSelectedOpenItemId = normalizeOpenItemId(selectedOpenItemId);
+
+  if (exactForcedItem) {
+    setSelectedOpenItemId(exactForcedItem.id);
+  } else if (!normalizedSelectedOpenItemId) {
+    selectedOpenItemId = effectiveVisibleItems[0]?.id || "";
+  } else if (!effectiveVisibleItems.some((item) => normalizeOpenItemId(item.id) === normalizedSelectedOpenItemId)) {
     selectedOpenItemId = "";
   }
-  if (effectiveVisibleItems.length && !effectiveVisibleItems.some((item) => item.id === selectedOpenItemId)) {
-    selectedOpenItemId = effectiveVisibleItems[0].id;
-  }
 
-  const selectedItem = effectiveVisibleItems.find((item) => item.id === selectedOpenItemId) || effectiveVisibleItems[0] || null;
+  const selectedItem = effectiveVisibleItems.find((item) => normalizeOpenItemId(item.id) === normalizeOpenItemId(selectedOpenItemId))
+    || null;
   openItemsToolbarFilters.innerHTML = `
     <div class="open-items-nav-group">
       <span class="open-items-nav-label">Scope</span>
@@ -2171,8 +2481,10 @@ function renderOpenItems() {
   `;
   const renderOpenItemCard = (item) => {
     const node = openItemTemplate.content.firstElementChild.cloneNode(true);
-    node.id = `open-item-detail-${item.id}`;
-    node.classList.toggle("open-item-card--highlight", highlightedOpenItemId === item.id);
+    const normalizedItemId = normalizeOpenItemId(item.id);
+    node.id = `open-item-${normalizedItemId}`;
+    node.dataset.openItemId = normalizedItemId;
+    node.classList.toggle("open-item-card--highlight", normalizeOpenItemId(highlightedOpenItemId) === normalizedItemId);
     const impactContext = getOpenItemImpactContext(item);
     const evaluationSummary = getEvaluationSummary(item);
     const pendingAreas = getOpenItemPendingAreas(item);
@@ -2847,7 +3159,7 @@ function renderOpenItems() {
     return node;
   };
 
-  if (!availableStatusTabs.length) {
+  if (!availableStatusTabs.length && !effectiveVisibleItems.length) {
     openItemsList.innerHTML = "<p class=\"meta-line\">No hay open items activos.</p>";
     return;
   }
@@ -2877,6 +3189,7 @@ function renderOpenItems() {
     button.addEventListener("click", () => {
       selectedOpenItemsImpactTab = button.dataset.openItemsImpactTab || "impacting";
       selectedOpenItemId = "";
+      setForcedVisibleOpenItemId("");
       renderOpenItems();
     });
   });
@@ -2885,13 +3198,15 @@ function renderOpenItems() {
     button.addEventListener("click", () => {
       selectedOpenItemsStatusTab = button.dataset.openItemsStatusTab || "NEW";
       selectedOpenItemId = "";
+      setForcedVisibleOpenItemId("");
       renderOpenItems();
     });
   });
 
   openItemsList.querySelectorAll("[data-open-item-ticket-tab]").forEach((button) => {
     button.addEventListener("click", () => {
-      selectedOpenItemId = button.dataset.openItemTicketTab || "";
+      setSelectedOpenItemId(button.dataset.openItemTicketTab || "");
+      setForcedVisibleOpenItemId("");
       renderOpenItems();
     });
   });
@@ -2899,6 +3214,10 @@ function renderOpenItems() {
   const cardHost = openItemsList.querySelector(".open-items-active-card");
   if (cardHost && selectedItem) {
     cardHost.appendChild(renderOpenItemCard(selectedItem));
+  }
+
+  if (pendingScrollOpenItemId) {
+    scrollToOpenItemCard(pendingScrollOpenItemId);
   }
 
   renderChangeManagerView();
@@ -3265,12 +3584,11 @@ async function loadState() {
   renderSourceStatus();
   renderSummaryDashboard(payload.prerequisite);
   await loadPreSessionDashboard();
-  if (deepLinkState.tab === "items" && deepLinkState.openItemId) {
-    const linkedItem = state.openItems.find((item) => normalizeOpenItemId(item.id) === normalizeOpenItemId(deepLinkState.openItemId));
-    if (linkedItem) {
-      handleFindTicketSelect(linkedItem.id);
-      deepLinkState.openItemId = "";
-    }
+  isStateLoaded = true;
+  const navigationTarget = pendingNavigationOpenItemId || (deepLinkState.tab === "items" ? deepLinkState.openItemId : "");
+  if (navigationTarget) {
+    pendingNavigationOpenItemId = "";
+    navigateToOpenItem(navigationTarget);
   }
 }
 
@@ -3434,6 +3752,7 @@ function showGoogleSheetsOAuthResultFromQuery() {
 async function applyImportedPayload(response) {
   const payload = await parseApiResponse(response, "No se pudo sincronizar la informacion.");
   Object.assign(state, payload.state);
+  isStateLoaded = true;
   renderReferencePanels();
   renderPrerequisite(payload.prerequisite);
   renderAreas();
@@ -3442,6 +3761,15 @@ async function applyImportedPayload(response) {
   updateNextOpenItemSuggestion(true);
   renderSummaryDashboard(payload.prerequisite);
   await loadPreSessionDashboard();
+  if (pendingNavigationOpenItemId) {
+    const navigationTarget = pendingNavigationOpenItemId;
+    pendingNavigationOpenItemId = "";
+    navigateToOpenItem(navigationTarget);
+  }
+}
+
+function closeAdminMenu() {
+  document.getElementById("open-items-admin-menu")?.removeAttribute("open");
 }
 
 openItemForm.addEventListener("submit", async (event) => {
@@ -3504,6 +3832,7 @@ document.getElementById("save-state").addEventListener("click", async () => {
   }
   try {
     await saveState();
+    closeAdminMenu();
     showAppToast("Dato actualizado");
   } catch (error) {
     window.alert(error.message || "No se pudo guardar el estado.");
@@ -3544,6 +3873,7 @@ document.getElementById("export-debug-state")?.addEventListener("click", () => {
   link.download = `ccb-debug-${new Date().toISOString().slice(0, 10)}.json`;
   link.click();
   URL.revokeObjectURL(url);
+  closeAdminMenu();
 });
 
 document.getElementById("load-seed").addEventListener("click", async () => {
@@ -3556,9 +3886,40 @@ document.getElementById("load-seed").addEventListener("click", async () => {
       const response = await fetch(apiUrl("/api/reset"), { method: "POST" });
       await applyImportedPayload(response);
     });
+    closeAdminMenu();
   } catch (error) {
     window.alert(error.message || "No se pudo restaurar la demo.");
   }
+});
+
+document.getElementById("normalize-open-item-statuses")?.addEventListener("click", async () => {
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
+  const changed = normalizeOpenItemStatusesForAdmin();
+  if (!changed) {
+    closeAdminMenu();
+    showAppToast("Statuses already normalized");
+    return;
+  }
+  try {
+    await saveState();
+    closeAdminMenu();
+    showAppToast(`Normalized ${changed} status field${changed === 1 ? "" : "s"}`);
+  } catch (error) {
+    window.alert(error.message || "No se pudieron normalizar los statuses.");
+  }
+});
+
+document.getElementById("open-debug-tools")?.addEventListener("click", () => {
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
+  closeAdminMenu();
+  setGovernanceDrawerVisibility(true);
+  activateTab("summary");
 });
 
 document.getElementById("sync-google-sheet").addEventListener("click", async () => {
@@ -3703,12 +4064,17 @@ tabButtons.forEach((button) => {
 
 document.addEventListener("click", (event) => {
   if (!headerOpenItemSearch || !openItemsSearchPanelOpen) {
-    return;
+  } else {
+    const shell = headerOpenItemSearch.querySelector("[data-open-item-search-shell]");
+    if (shell && !shell.contains(event.target)) {
+      closeOpenItemSearchPanel();
+      renderHeaderOpenItemSearch();
+    }
   }
-  const shell = headerOpenItemSearch.querySelector("[data-open-item-search-shell]");
-  if (shell && !shell.contains(event.target)) {
-    closeOpenItemSearchPanel();
-    renderHeaderOpenItemSearch();
+
+  const adminMenu = document.getElementById("open-items-admin-menu");
+  if (adminMenu?.hasAttribute("open") && !adminMenu.contains(event.target)) {
+    adminMenu.removeAttribute("open");
   }
 });
 

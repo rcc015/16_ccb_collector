@@ -29,6 +29,7 @@
         <div class="app-header-status">
           <div id="source-status-pill" class="summary-source-pill"></div>
           <div id="prerequisite-card" class="status-pill"></div>
+          <div id="save-status-pill" class="status-pill status-pill--save"></div>
         </div>
         <div class="app-header-user">
           <div class="app-header-user-main">
@@ -167,11 +168,13 @@
               <div class="button-row">
                 <button id="open-new-item-drawer" type="button">＋ New item</button>
                 <details id="open-items-admin-menu" class="admin-menu" hidden>
-                  <summary class="secondary">⋯ Admin</summary>
+                  <summary class="secondary" aria-label="Admin menu">⌘ Admin</summary>
                   <div class="admin-menu-panel">
-                    <button id="save-state" type="button" class="secondary">💾 Save changes</button>
-                    <button id="load-seed" type="button" class="secondary">↺ Restore demo</button>
-                    <button id="export-debug-state" type="button" class="secondary">⇩ Export debug JSON</button>
+                    <button id="save-state" type="button" class="secondary">Save changes</button>
+                    <button id="load-seed" type="button" class="secondary">Restore demo</button>
+                    <button id="normalize-open-item-statuses" type="button" class="secondary">Normalize statuses</button>
+                    <button id="export-debug-state" type="button" class="secondary">Export debug JSON</button>
+                    <button id="open-debug-tools" type="button" class="secondary">Debug tools</button>
                   </div>
                 </details>
               </div>
