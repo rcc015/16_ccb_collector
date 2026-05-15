@@ -1,19 +1,28 @@
 <!DOCTYPE html>
-<html lang="es" data-base-path="__APP_BASE_PATH__">
+<html lang="en-US" data-base-path="__APP_BASE_PATH__">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CCB Collector</title>
+    <title>Conceivable Change Control Board</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
   <body>
     <section id="auth-screen" class="auth-shell">
       <div class="auth-card">
-        <p class="eyebrow">Conceivable Access</p>
-        <h1>CCB Collector</h1>
+        <div class="auth-brand">
+          <img
+            src="__APP_LOGO_PATH__"
+            alt="Conceivable Life Sciences"
+            class="brand-logo brand-logo--auth"
+            onerror="this.style.display='none';this.alt='';this.nextElementSibling.hidden=false;"
+          />
+          <div class="brand-fallback" hidden>Conceivable Life Sciences</div>
+          <p class="eyebrow">Change Control Board</p>
+        </div>
+        <h1>Secure workspace access</h1>
         <p class="hero-copy">
-          Acceso restringido con Google para usuarios `@conceivable.life`.
+          Restricted Google sign-in for approved `@conceivable.life` users.
         </p>
         <div id="auth-status" class="meta-line"></div>
         <div id="google-signin"></div>
@@ -23,7 +32,13 @@
     <main id="app-shell" class="app-shell app-hidden">
       <header class="app-header">
         <div class="app-header-brand">
-          <h1>CCB Collector</h1>
+          <img
+            src="__APP_LOGO_PATH__"
+            alt="Conceivable Life Sciences"
+            class="brand-logo brand-logo--header"
+            onerror="this.style.display='none';this.alt='';this.nextElementSibling.hidden=false;"
+          />
+          <div class="brand-fallback brand-fallback--header" hidden>Conceivable Life Sciences</div>
           <p>Change Control Board</p>
         </div>
         <div class="app-header-status">
@@ -34,20 +49,20 @@
         <div class="app-header-user">
           <div class="app-header-user-main">
             <div id="current-user" class="meta-line"></div>
-            <button id="logout-button" class="secondary">Salir</button>
+            <button id="logout-button" class="secondary">Sign out</button>
           </div>
           <div id="header-open-item-search" class="header-open-item-search" hidden></div>
         </div>
       </header>
 
       <section class="tab-shell">
-        <nav class="tab-nav" aria-label="Secciones principales">
-          <button class="tab-button is-active" type="button" data-tab="summary">Resumen</button>
-          <button class="tab-button" type="button" data-tab="presession">Pre-sesion CCB</button>
+        <nav class="tab-nav" aria-label="Primary sections">
+          <button class="tab-button is-active" type="button" data-tab="summary">Summary</button>
+          <button class="tab-button" type="button" data-tab="presession">CCB Pre-Session</button>
           <button class="tab-button" type="button" data-tab="items">Open Items</button>
           <button id="change-manager-tab-button" class="tab-button" type="button" data-tab="change-manager" hidden>Change Manager View</button>
-          <button class="tab-button" type="button" data-tab="sources">Fuentes</button>
-          <button class="tab-button" type="button" data-tab="framework">Marco CCB</button>
+          <button class="tab-button" type="button" data-tab="sources">Sources</button>
+          <button class="tab-button" type="button" data-tab="framework">CCB Framework</button>
         </nav>
 
         <section class="tab-panel is-active" data-tab-panel="summary">
@@ -115,23 +130,23 @@
                     <h3>Governance Settings</h3>
                     <p class="meta-line">Owners, mappings and synchronization controls for the governance model.</p>
                   </div>
-                  <button type="button" class="secondary" data-governance-close>Cerrar</button>
+                  <button type="button" class="secondary" data-governance-close>Close</button>
                 </div>
                 <div class="governance-settings-groups">
                   <section class="governance-settings-card">
                     <div class="section-heading">
                       <h3>Area Owners</h3>
                       <div class="button-row">
-                        <button id="update-owners-button" class="secondary">Actualizar owners</button>
-                        <button id="sync-google-sheet" class="secondary">Sincronizar Sheet</button>
-                        <button id="export-state" class="secondary">Exportar JSON</button>
+                        <button id="update-owners-button" class="secondary">Update owners</button>
+                        <button id="sync-google-sheet" class="secondary">Sync sheet</button>
+                        <button id="export-state" class="secondary">Export JSON</button>
                       </div>
                     </div>
-                    <p class="meta-line">Edita directamente los owners reales sincronizados con la pestaña <strong>CCB Areas</strong>.</p>
+                    <p class="meta-line">Edit the live area owners synchronized from the <strong>CCB Areas</strong> sheet.</p>
                     <div class="button-row">
                       <input id="employees-csv-file-input" type="file" accept=".csv,text/csv" />
-                      <button id="import-employees-csv-button" class="secondary">Importar empleados CSV</button>
-                      <button id="clear-employees-button" class="secondary">Limpiar empleados</button>
+                      <button id="import-employees-csv-button" class="secondary">Import employee CSV</button>
+                      <button id="clear-employees-button" class="secondary">Clear employees</button>
                     </div>
                     <div id="employees-import-status" class="source-status"></div>
                     <div id="areas-list" class="area-editor-list"></div>
@@ -147,7 +162,7 @@
                       <span class="chip">Threshold Rules</span>
                       <span class="chip">CCB Decision Rules</span>
                     </div>
-                    <p class="meta-line">La app sigue usando datos vivos de Open Item List, CCB Evaluations, Votes, impact mappings y pending evaluators.</p>
+                    <p class="meta-line">The app continues using live Open Item List, CCB Evaluations, Votes, impact mappings, and pending evaluator data.</p>
                   </section>
                 </div>
               </div>
@@ -160,16 +175,18 @@
             <div class="open-items-toolbar">
               <div class="open-items-toolbar-main">
                 <div>
-                  <h2>Open items activos</h2>
-                  <p class="meta-line">Workspace operativo para seguimiento, aprobacion y evaluacion CCB.</p>
+                  <h2>Active Open Items</h2>
+                  <p class="meta-line">Operational workspace for CCB review, approvals, and implementation follow-through.</p>
                 </div>
                 <div id="open-items-toolbar-filters" class="open-items-toolbar-filters"></div>
               </div>
               <div class="button-row">
                 <button id="open-new-item-drawer" type="button">＋ New item</button>
+                <span id="email-mode-badge" class="email-mode-badge" hidden></span>
                 <details id="open-items-admin-menu" class="admin-menu" hidden>
                   <summary class="secondary" aria-label="Admin menu">⌘ Admin</summary>
                   <div class="admin-menu-panel">
+                    <button id="open-email-mode-drawer" type="button" class="secondary">Email delivery mode</button>
                     <button id="save-state" type="button" class="secondary">Save changes</button>
                     <button id="load-seed" type="button" class="secondary">Restore demo</button>
                     <button id="normalize-open-item-statuses" type="button" class="secondary">Normalize statuses</button>
@@ -222,32 +239,62 @@
               </form>
             </div>
           </aside>
+
+          <aside id="email-mode-drawer" class="form-drawer" hidden>
+            <div class="form-drawer-backdrop" data-email-mode-close></div>
+            <div class="form-drawer-panel form-drawer-panel--compact">
+              <div class="section-heading">
+                <div>
+                  <h3>Email delivery mode</h3>
+                  <p class="meta-line">Control whether notifications go to the test override address or to real assigned owners.</p>
+                </div>
+                <button type="button" class="secondary" data-email-mode-close>Close</button>
+              </div>
+              <div class="email-mode-panel">
+                <div id="email-mode-summary" class="source-status" data-mode="local"></div>
+                <div class="email-mode-options">
+                  <button id="email-mode-test" type="button" class="email-mode-option">
+                    <strong>Test email mode</strong>
+                    <span>Send all notifications to the configured override address and include the original intended recipient in the footer.</span>
+                  </button>
+                  <button id="email-mode-live" type="button" class="email-mode-option">
+                    <strong>Live owner emails</strong>
+                    <span>Send future notifications directly to the assigned owners and users.</span>
+                  </button>
+                </div>
+                <p id="email-mode-inline-status" class="meta-line"></p>
+              </div>
+              <div class="form-drawer-footer">
+                <button type="button" class="secondary" data-email-mode-close>Close</button>
+              </div>
+            </div>
+          </aside>
         </section>
 
         <section class="tab-panel" data-tab-panel="presession">
           <section class="panel two-column">
             <div class="panel-column">
               <div class="section-heading">
-                <h2>Tu revision</h2>
+                  <h2>Your review</h2>
               </div>
               <p class="meta-line">
-                La pre-sesion solo considera open items con <strong>CCB Status = NEW</strong>.
+                Pre-session review only includes Open Items with <strong>CCB Status = NEW</strong>.
               </p>
               <div id="presession-owner-summary" class="source-status"></div>
               <div id="presession-pending-list" class="presession-list"></div>
               <div class="section-heading top-gap">
-                <h2>Ya respondido</h2>
+                <h2>Responded items</h2>
               </div>
               <div id="presession-answered-list" class="presession-list"></div>
             </div>
 
             <div class="panel-column">
               <div class="section-heading">
-                <h2>Job de solicitud</h2>
-                <button id="run-presession-job" class="secondary">Enviar pendientes</button>
+                <h2>Request job</h2>
+                <button id="run-presession-job" class="secondary">Send pending requests</button>
               </div>
               <p class="meta-line">
-                Este job agrupa los open items <strong>NEW</strong> sin respuesta por owner y les manda la solicitud de revision de pre-sesion.
+                This job groups <strong>NEW</strong> Open Items with no owner response and sends a pre-session review request.
               </p>
               <div id="presession-job-summary" class="source-status"></div>
               <div id="presession-job-status" class="report-box"></div>
@@ -324,9 +371,9 @@
                 </div>
 
                 <select id="cm-status" name="status" required>
-                  <option value="Open">Open</option>
-                  <option value="In Progress">In Progress</option>
-                  <option value="Closed">Closed</option>
+                  <option value="OPEN">OPEN</option>
+                  <option value="IN PROGRESS">IN PROGRESS</option>
+                  <option value="CLOSED">CLOSED</option>
                 </select>
                 <input id="cm-date-created" name="dateCreated" type="date" />
                 <input id="cm-due-date" name="dueDate" type="date" />
@@ -349,14 +396,14 @@
         <section class="tab-panel" data-tab-panel="sources">
           <section class="panel">
             <div class="section-heading">
-              <h2>Google Sheets con tu cuenta</h2>
+              <h2>Google Sheets with your account</h2>
               <div class="button-row">
-                <button id="connect-google-sheets-user" class="secondary">Conectar cuenta</button>
-                <button id="disconnect-google-sheets-user" class="secondary">Desconectar</button>
+                <button id="connect-google-sheets-user" class="secondary">Connect account</button>
+                <button id="disconnect-google-sheets-user" class="secondary">Disconnect</button>
               </div>
             </div>
             <p class="meta-line">
-              Modo temporal para usar OAuth de usuario en lugar de service account. Requiere un client secret web y un redirect URI autorizado.
+              Temporary mode to use user OAuth instead of a service account. Requires a web client secret and an authorized redirect URI.
             </p>
             <div id="google-sheets-user-auth-status" class="source-status"></div>
           </section>
@@ -365,21 +412,21 @@
             <div class="section-heading">
               <h2>Live Sync</h2>
               <div class="button-row">
-                <button id="save-live-sync" class="secondary">Guardar Live Sync</button>
-                <button id="run-live-sync" class="secondary">Sincronizar ahora</button>
+                <button id="save-live-sync" class="secondary">Save Live Sync</button>
+                <button id="run-live-sync" class="secondary">Sync now</button>
               </div>
             </div>
             <div class="grid-form">
               <label class="checkbox">
                 <input id="live-sync-enabled" type="checkbox" />
-                Activar sincronizacion automatica
+                Enable automatic synchronization
               </label>
               <select id="live-sync-source-type">
                 <option value="csv">CSV URL</option>
                 <option value="json">JSON URL</option>
                 <option value="google-sheets">Google Sheets API</option>
               </select>
-              <input id="live-sync-source-url" placeholder="https://script.google.com/... o URL CSV publicada" />
+              <input id="live-sync-source-url" placeholder="https://script.google.com/... or a published CSV URL" />
               <input id="live-sync-interval-ms" type="number" min="30000" step="30000" placeholder="300000" />
             </div>
             <pre id="live-sync-status" class="report-box"></pre>
@@ -387,14 +434,14 @@
 
           <section class="panel">
             <div class="section-heading">
-              <h2>Importar Open Item List CSV</h2>
+              <h2>Import Open Item List CSV</h2>
             </div>
             <p class="meta-line">
-              Exporta la pestaña <strong>Open Item List</strong> de Google Sheets como CSV, cargala aqui y luego la app actualiza el snapshot local y los open items.
+              Export the <strong>Open Item List</strong> sheet from Google Sheets as CSV, upload it here, and the app will refresh the local snapshot and Open Items.
             </p>
             <div class="button-row">
               <input id="csv-file-input" type="file" accept=".csv,text/csv" />
-              <button id="import-csv-button" class="secondary">Importar CSV</button>
+              <button id="import-csv-button" class="secondary">Import CSV</button>
             </div>
           </section>
         </section>
@@ -403,14 +450,14 @@
           <section class="panel two-column">
             <div>
               <div class="section-heading">
-                <h2>Guia OIL</h2>
+                <h2>OIL Guide</h2>
               </div>
               <div id="guideline-list" class="reference-list"></div>
             </div>
 
             <div>
               <div class="section-heading">
-                <h2>Decision CCB</h2>
+                <h2>CCB Decision</h2>
               </div>
               <div id="decision-framework" class="reference-list"></div>
             </div>

@@ -21,6 +21,7 @@ const openNewItemDrawerButton = document.getElementById("open-new-item-drawer");
 const openItemDescriptionField = document.getElementById("open-item-description-field");
 const toggleOpenItemDescriptionButton = document.getElementById("toggle-open-item-description");
 const appToast = document.getElementById("app-toast");
+const emailModeBadge = document.getElementById("email-mode-badge");
 const dailyReport = document.getElementById("daily-report");
 const summaryKpiGrid = document.getElementById("summary-kpi-grid");
 const summaryMoreMetrics = document.getElementById("summary-more-metrics");
@@ -37,6 +38,11 @@ const changeManagerTabButton = document.getElementById("change-manager-tab-butto
 const changeManagerReadyList = document.getElementById("change-manager-ready-list");
 const changeManagerActiveList = document.getElementById("change-manager-active-list");
 const changeManagerDrawer = document.getElementById("change-manager-drawer");
+const emailModeDrawer = document.getElementById("email-mode-drawer");
+const emailModeSummary = document.getElementById("email-mode-summary");
+const emailModeInlineStatus = document.getElementById("email-mode-inline-status");
+const emailModeTestButton = document.getElementById("email-mode-test");
+const emailModeLiveButton = document.getElementById("email-mode-live");
 const changeManagerForm = document.getElementById("change-manager-form");
 const csvFileInput = document.getElementById("csv-file-input");
 const employeesCsvFileInput = document.getElementById("employees-csv-file-input");
@@ -149,6 +155,7 @@ const DECISION_THRESHOLDS = [
 ];
 
 let authConfig = null;
+let emailModeStatus = null;
 let importedContacts = [];
 let preSessionDashboard = null;
 let autoSavePromise = null;
@@ -450,8 +457,8 @@ function getNextOpenItemId() {
 
 function updateNextOpenItemSuggestion(forceValue = false) {
   const nextId = getNextOpenItemId();
-  nextOpenItemHint.textContent = `Siguiente ID: ${nextId}`;
-  openItemIdInput.placeholder = `ID, ej. ${nextId}`;
+  nextOpenItemHint.textContent = `Next ID: ${nextId}`;
+  openItemIdInput.placeholder = `ID, e.g. ${nextId}`;
   if (forceValue || !String(openItemIdInput.value || "").trim()) {
     openItemIdInput.value = nextId;
   }
@@ -476,7 +483,7 @@ function escapeHtml(value) {
 }
 
 function logCriterionWarning(criterionId, message, payload) {
-  console.warn(`[CCB Collector] Malformed evaluation template for "${criterionId}": ${message}`, payload);
+  console.warn(`[Conceivable CCB] Malformed evaluation template for "${criterionId}": ${message}`, payload);
 }
 
 function normalizeCriterionScoringGuide(criterionId, scoringGuide, fallbackGuide) {
@@ -758,7 +765,7 @@ async function saveCcbEvaluation(openItemId, evaluator, evaluation) {
       criteria: evaluation,
     }),
   });
-  const payload = await parseApiResponse(response, "No se pudo guardar la evaluacion CCB.");
+  const payload = await parseApiResponse(response, "Failed to save the CCB evaluation.");
   Object.assign(state, payload.state);
   return payload;
 }
@@ -768,20 +775,20 @@ function renderSourceStatus() {
   const sourceType = source.type || "local";
   const sourceLabel = {
     "google-sheets": "Google Sheets",
-    "google-sheet-snapshot": "Snapshot de Google Sheet",
-    local: "Estado local",
+    "google-sheet-snapshot": "Google Sheets snapshot",
+    local: "Local state",
   }[sourceType] || sourceType;
-  const title = source.spreadsheetTitle || "Sin titulo cargado";
+  const title = source.spreadsheetTitle || "Untitled source";
   const sheetName = source.sheetName || "Open Item List";
   const importedAt = source.importedAt || state.lastSavedAt || "";
 
   sourceStatus.dataset.mode = sourceType;
   sourceStatus.innerHTML = [
-    `<div><strong>Fuente activa:</strong> ${sourceLabel}</div>`,
+    `<div><strong>Active source:</strong> ${sourceLabel}</div>`,
     `<div><strong>Spreadsheet:</strong> ${title}</div>`,
-    `<div><strong>Hoja:</strong> ${sheetName}</div>`,
-    `<div><strong>Ultima carga:</strong> ${formatDateTime(importedAt)}</div>`,
-    `<div><strong>Ultimo guardado:</strong> ${formatDateTime(state.lastSavedAt)}</div>`,
+    `<div><strong>Sheet:</strong> ${sheetName}</div>`,
+    `<div><strong>Last import:</strong> ${formatDateTime(importedAt)}</div>`,
+    `<div><strong>Last saved:</strong> ${formatDateTime(state.lastSavedAt)}</div>`,
   ].join("");
 }
 
@@ -811,17 +818,65 @@ function renderHeaderStatusPills() {
   }
 }
 
+function getEmailModeBadgeLabel() {
+  return emailModeStatus?.mode === "live" ? "Live emails active" : "Test emails active";
+}
+
+function renderEmailModeUi() {
+  const isAdmin = isAdminOverrideUser();
+  if (emailModeBadge) {
+    if (!isAdmin || !emailModeStatus) {
+      emailModeBadge.hidden = true;
+      emailModeBadge.textContent = "";
+      delete emailModeBadge.dataset.mode;
+    } else {
+      emailModeBadge.hidden = false;
+      emailModeBadge.dataset.mode = emailModeStatus.mode || "test";
+      emailModeBadge.textContent = getEmailModeBadgeLabel();
+    }
+  }
+
+  if (emailModeSummary) {
+    if (!isAdmin || !emailModeStatus) {
+      emailModeSummary.innerHTML = "<div><strong>Email delivery mode:</strong> unavailable</div>";
+    } else {
+      emailModeSummary.dataset.mode = emailModeStatus.mode === "live" ? "google-sheets" : "review";
+      emailModeSummary.innerHTML = [
+        `<div><strong>Mode:</strong> ${emailModeStatus.mode === "live" ? "Live owner emails" : "Test email mode"}</div>`,
+        `<div><strong>Delivery:</strong> ${emailModeStatus.effectiveRecipientBehavior === "actual" ? "Actual assigned recipients" : "Override recipient"}</div>`,
+        `<div><strong>Override email:</strong> ${escapeHtml(emailModeStatus.overrideEmail || "Not configured")}</div>`,
+      ].join("");
+    }
+  }
+
+  if (emailModeInlineStatus) {
+    if (!isAdmin || !emailModeStatus) {
+      emailModeInlineStatus.textContent = "";
+    } else if (emailModeStatus.mode === "live") {
+      emailModeInlineStatus.textContent = "Future notifications will be sent to real assigned owners.";
+    } else if (emailModeStatus.overrideEmail) {
+      emailModeInlineStatus.textContent = `All notifications will be sent to ${emailModeStatus.overrideEmail}.`;
+    } else {
+      emailModeInlineStatus.textContent = "Test email mode is active but PRESESSION_EMAIL_OVERRIDE is not configured.";
+    }
+  }
+
+  emailModeTestButton?.classList.toggle("is-active", emailModeStatus?.mode !== "live");
+  emailModeLiveButton?.classList.toggle("is-active", emailModeStatus?.mode === "live");
+}
+
 function renderReferencePanels() {
   const adminMenu = document.getElementById("open-items-admin-menu");
   if (adminMenu) {
     adminMenu.hidden = !isAdminOverrideUser();
   }
+  renderEmailModeUi();
   guidelineList.innerHTML = OIL_GUIDELINES.map((item) => `
     <article class="reference-card">
       <h3>${item.title}</h3>
       <p>${item.body}</p>
       <ul>${item.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
-      <span class="reference-badge">Ejemplo: ${item.example}</span>
+      <span class="reference-badge">Example: ${item.example}</span>
     </article>
   `).join("");
 
@@ -846,30 +901,30 @@ function renderReferencePanels() {
 function renderGoogleSheetsUserAuthStatus(status = authConfig?.googleSheetsAuth || {}) {
   const configuredMode = status.configuredMode || "auto";
   const activeMode = status.mode || "snapshot";
-  const configured = status.userOAuthConfigured ? "Si" : "No";
-  const connected = status.userOAuthConnected ? "Si" : "No";
+  const configured = status.userOAuthConfigured ? "Yes" : "No";
+  const connected = status.userOAuthConnected ? "Yes" : "No";
   const redirectUri = status.userOAuthRedirectUri || "N/A";
 
   googleSheetsUserAuthStatus.dataset.mode = activeMode;
   googleSheetsUserAuthStatus.innerHTML = [
-    `<div><strong>Modo configurado:</strong> ${configuredMode}</div>`,
-    `<div><strong>Modo activo:</strong> ${activeMode}</div>`,
-    `<div><strong>OAuth configurado:</strong> ${configured}</div>`,
-    `<div><strong>Cuenta conectada:</strong> ${connected}</div>`,
+    `<div><strong>Configured mode:</strong> ${configuredMode}</div>`,
+    `<div><strong>Active mode:</strong> ${activeMode}</div>`,
+    `<div><strong>OAuth configured:</strong> ${configured}</div>`,
+    `<div><strong>Connected account:</strong> ${connected}</div>`,
     `<div><strong>Redirect URI:</strong> ${redirectUri}</div>`,
   ].join("");
 }
 
 function renderEmployeesImportStatus(directory = {}) {
   const count = Array.isArray(directory.contacts) ? directory.contacts.length : importedContacts.length;
-  const sourceName = directory.sourceName || "Sin archivo importado";
-  const importedAt = directory.importedAt ? formatDateTime(directory.importedAt) : "Nunca";
+  const sourceName = directory.sourceName || "No file imported";
+  const importedAt = directory.importedAt ? formatDateTime(directory.importedAt) : "Never";
 
   employeesImportStatus.dataset.mode = count ? "google-sheet-snapshot" : "local";
   employeesImportStatus.innerHTML = [
-    `<div><strong>Contactos cargados:</strong> ${count}</div>`,
-    `<div><strong>Archivo:</strong> ${sourceName}</div>`,
-    `<div><strong>Ultima importacion:</strong> ${importedAt}</div>`,
+    `<div><strong>Loaded contacts:</strong> ${count}</div>`,
+    `<div><strong>File:</strong> ${sourceName}</div>`,
+    `<div><strong>Last import:</strong> ${importedAt}</div>`,
   ].join("");
 }
 
@@ -892,11 +947,11 @@ function renderPreSessionDashboard() {
   preSessionOwnerSummary.dataset.mode = ownedAreas.length ? "google-sheet-snapshot" : "local";
   preSessionOwnerSummary.innerHTML = ownedAreas.length
     ? [
-        `<div><strong>Areas detectadas:</strong> ${ownedAreas.map((area) => escapeHtml(area.name)).join(", ")}</div>`,
-        `<div><strong>Pendientes:</strong> ${pendingItems.length}</div>`,
-        `<div><strong>Respondidos:</strong> ${answeredItems.length}</div>`,
+        `<div><strong>Detected areas:</strong> ${ownedAreas.map((area) => escapeHtml(area.name)).join(", ")}</div>`,
+        `<div><strong>Pending:</strong> ${pendingItems.length}</div>`,
+        `<div><strong>Responded:</strong> ${answeredItems.length}</div>`,
       ].join("")
-    : "<div><strong>No encontramos areas</strong> asociadas a tu correo en CCB Areas.</div>";
+    : "<div><strong>No matching areas</strong> were found for your email in CCB Areas.</div>";
 
   preSessionPendingList.innerHTML = pendingItems.length
     ? pendingItems.map((item) => `
@@ -918,15 +973,15 @@ function renderPreSessionDashboard() {
           </div>
           ${preSessionExpandedItems.has(`${item.openItemId}:${item.areaId}`) ? `
             <div class="presession-queue-expanded">
-              <p class="meta-line">Open item nuevo o pendiente para tu area. ${item.requestedAt ? `Solicitado: ${escapeHtml(formatDateTime(item.requestedAt))}.` : "Aun no se ha enviado solicitud."}</p>
+              <p class="meta-line">This Open Item is new or still pending for your area. ${item.requestedAt ? `Requested ${escapeHtml(formatDateTime(item.requestedAt))}.` : "A request has not been sent yet."}</p>
               ${preSessionCommentExpandedItems.has(`${item.openItemId}:${item.areaId}`) ? `
-                <textarea data-presession-comment data-open-item-id="${escapeHtml(item.openItemId)}" data-area-id="${escapeHtml(item.areaId)}" rows="3" placeholder="Comentario opcional para tu revision"></textarea>
+                <textarea data-presession-comment data-open-item-id="${escapeHtml(item.openItemId)}" data-area-id="${escapeHtml(item.areaId)}" rows="3" placeholder="Optional comment for your review"></textarea>
               ` : `<button type="button" class="secondary" data-presession-comment-toggle="${escapeHtml(item.openItemId)}:${escapeHtml(item.areaId)}">Add comment</button>`}
             </div>
           ` : ""}
         </article>
       `).join("")
-    : "<p class=\"meta-line\">No tienes open items pendientes por responder.</p>";
+    : "<p class=\"meta-line\">You have no pending Open Items to review.</p>";
 
   preSessionAnsweredList.innerHTML = answeredItems.length
     ? answeredItems.map((item) => `
@@ -934,22 +989,22 @@ function renderPreSessionDashboard() {
           <div class="presession-queue-main">
             <div>
               <h3>${escapeHtml(item.openItemId)} · ${escapeHtml(item.title)}</h3>
-              <p class="meta-line">${escapeHtml(item.areaName)} · Respondido ${escapeHtml(formatDateTime(item.respondedAt))}</p>
+              <p class="meta-line">${escapeHtml(item.areaName)} · Responded ${escapeHtml(formatDateTime(item.respondedAt))}</p>
             </div>
             <span class="decision-pill" data-decision="${escapeHtml(item.decision)}">${item.decision === "impact" ? "Impacts me" : "No impact"}</span>
           </div>
           ${item.comment ? `<p class="meta-line">${escapeHtml(item.comment)}</p>` : ""}
         </article>
       `).join("")
-    : "<p class=\"meta-line\">Todavia no has respondido revisiones.</p>";
+    : "<p class=\"meta-line\">You have not responded to any reviews yet.</p>";
 
   preSessionJobSummary.dataset.mode = gmailDeliveryAvailable ? "google-sheets" : "local";
   const totalPendingEvaluations = openItemQueue.reduce((total, item) => total + item.pendingOwners.length, 0);
   preSessionJobSummary.innerHTML = [
-    `<div><strong>Owners pendientes:</strong> ${ownerQueue.length}</div>`,
-    `<div><strong>Open items con evaluacion pendiente:</strong> ${openItemQueue.length}</div>`,
-    `<div><strong>Evaluaciones pendientes:</strong> ${totalPendingEvaluations}</div>`,
-    `<div><strong>Envio Gmail:</strong> ${gmailDeliveryAvailable ? "Disponible con tu OAuth conectado" : "No disponible, el job generara preview si falta autorizacion"}</div>`,
+    `<div><strong>Owners pending:</strong> ${ownerQueue.length}</div>`,
+    `<div><strong>Open Items pending evaluation:</strong> ${openItemQueue.length}</div>`,
+    `<div><strong>Pending evaluations:</strong> ${totalPendingEvaluations}</div>`,
+    `<div><strong>Gmail delivery:</strong> ${gmailDeliveryAvailable ? "Available with your connected OAuth session" : "Unavailable. The job will create a preview if authorization is missing."}</div>`,
   ].join("");
 
   if (openItemQueue.length && !openItemQueue.some((item) => item.openItemId === selectedPreSessionJobOpenItemId)) {
@@ -963,7 +1018,7 @@ function renderPreSessionDashboard() {
 
   preSessionJobStatus.innerHTML = openItemQueue.length
     ? `
-        <div class="presession-job-tabs" role="tablist" aria-label="Open items pendientes">
+        <div class="presession-job-tabs" role="tablist" aria-label="Pending Open Items">
           ${openItemQueue.map((item) => `
             <button
               type="button"
@@ -981,19 +1036,19 @@ function renderPreSessionDashboard() {
               <p class="presession-eyebrow">${escapeHtml(selectedJobItem.externalStatus || selectedJobItem.itemStatus || "open")}</p>
               <h3>${escapeHtml(selectedJobItem.openItemId)} · ${escapeHtml(selectedJobItem.title)}</h3>
             </div>
-            <span class="badge">${selectedJobItem.pendingOwners.length} pendiente(s)</span>
+                <span class="badge">${selectedJobItem.pendingOwners.length} pending</span>
           </div>
           <div class="presession-owner-pill-list">
             ${selectedJobItem.pendingOwners.map((owner) => `
               <div class="presession-owner-pill">
                 <strong>${escapeHtml(owner.areaName)}</strong>
-                <span>${escapeHtml(owner.ownerName || owner.ownerEmail || "Sin owner")}</span>
+                <span>${escapeHtml(owner.ownerName || owner.ownerEmail || "No owner")}</span>
               </div>
             `).join("")}
           </div>
         </article>
       `
-    : "<p class=\"meta-line\">No hay owners con solicitudes pendientes.</p>";
+    : "<p class=\"meta-line\">There are no owners with pending requests.</p>";
 
   preSessionJobStatus.querySelectorAll("[data-presession-job-tab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1044,13 +1099,13 @@ function renderPreSessionDashboard() {
             comment,
           }),
         });
-        const payload = await parseApiResponse(response, "No se pudo guardar tu revision de pre-sesion.");
+        const payload = await parseApiResponse(response, "Failed to save your pre-session review.");
         Object.assign(state, payload.state);
         preSessionDashboard = payload.dashboard;
-        preSessionJobStatus.textContent = `Revision guardada para ${openItemId} / ${areaId}.`;
+        preSessionJobStatus.textContent = `Review saved for ${openItemId} / ${areaId}.`;
         renderPreSessionDashboard();
       } catch (error) {
-        window.alert(error.message || "No se pudo guardar tu revision de pre-sesion.");
+        window.alert(error.message || "Failed to save your pre-session review.");
       }
     });
   });
@@ -1230,7 +1285,8 @@ function renderHeaderOpenItemSearch() {
   }
   const searchResults = getGlobalOpenItemSearchResults();
   syncOpenItemSearchActiveIndex(searchResults);
-  const showSuggestionPanel = openItemsSearchPanelOpen && searchResults.length > 0;
+  const hasQuery = openItemsSearchQuery.trim().length >= 2;
+  const showSuggestionPanel = openItemsSearchPanelOpen && (searchResults.length > 0 || hasQuery);
   headerOpenItemSearch.hidden = false;
   headerOpenItemSearch.innerHTML = `
     <span class="open-items-nav-label">Find ticket</span>
@@ -1248,7 +1304,7 @@ function renderHeaderOpenItemSearch() {
       ` : ""}
       ${showSuggestionPanel ? `
         <div class="open-items-search-suggestions">
-          ${searchResults.map((item, index) => `
+          ${searchResults.length ? searchResults.map((item, index) => `
             <button
               type="button"
               class="open-items-search-suggestion${index === openItemsSearchActiveIndex ? " is-active" : ""}"
@@ -1262,7 +1318,7 @@ function renderHeaderOpenItemSearch() {
               <span>${escapeHtml(item.title)}</span>
               <small>${escapeHtml(impactedAreaNames(item) || "No impacted areas")}</small>
             </button>
-          `).join("")}
+          `).join("") : `<div class="open-items-search-empty">No results found</div>`}
         </div>
       ` : ""}
     </div>
@@ -1423,7 +1479,7 @@ async function saveVote(openItemId, voteInput) {
       ...voteInput,
     }),
   });
-  const payload = await parseApiResponse(response, "No se pudo guardar el voto.");
+  const payload = await parseApiResponse(response, "Failed to save the vote.");
   Object.assign(state, payload.state);
   return payload;
 }
@@ -1509,7 +1565,7 @@ function formatOwnerLine(item) {
 function renderPrerequisite(prerequisite) {
   prerequisiteCard.dataset.status = prerequisite.status;
   prerequisiteCard.innerHTML = `
-    <strong>${prerequisite.status === "blocked" ? "BLOCKED" : prerequisite.status === "review" ? "REVIEW" : "CLEAR"}</strong>
+    <strong>${prerequisite.status === "blocked" ? "BLOCKED" : prerequisite.status === "review" ? "PENDING REVIEW" : "CLEAR"}</strong>
     <span>${escapeHtml(
       prerequisite.status === "blocked"
         ? `${prerequisite.blockedItems.length} substantial items pending impacted approvals`
@@ -1622,7 +1678,7 @@ function renderAreas() {
 
 function renderVotes(votes) {
   if (!votes.length) {
-    return "<p class=\"meta-line\">Sin votos registrados.</p>";
+    return "<p class=\"meta-line\">No votes recorded.</p>";
   }
 
   return votes
@@ -1632,7 +1688,7 @@ function renderVotes(votes) {
       return `
         <div class="vote-pill">
           <div><strong data-decision="${vote.decision}">${vote.decision}</strong> · ${owner}</div>
-          <div>${vote.comment || "Sin comentario"}</div>
+          <div>${vote.comment || "No comment"}</div>
         </div>
       `;
     })
@@ -1694,15 +1750,15 @@ function normalizeImplementationStatus(value) {
   }
 
   if (normalized === "open") {
-    return "Open";
+    return "OPEN";
   }
 
   if (normalized === "in progress") {
-    return "In Progress";
+    return "IN PROGRESS";
   }
 
   if (normalized === "closed") {
-    return "Closed";
+    return "CLOSED";
   }
 
   return "";
@@ -1751,7 +1807,7 @@ async function saveImplementationTracking(openItemId, payload) {
       ...payload,
     }),
   });
-  const result = await parseApiResponse(response, "No se pudo guardar el implementation tracking.");
+  const result = await parseApiResponse(response, "Failed to save implementation tracking.");
   Object.assign(state, result.state);
   return result;
 }
@@ -2026,7 +2082,7 @@ function renderSummaryBars(title, items, formatValue = (value) => String(value))
             </div>
             <strong>${escapeHtml(formatValue(item.value))}</strong>
           </div>
-        `).join("") : '<p class="meta-line">Sin datos suficientes.</p>'}
+        `).join("") : '<p class="meta-line">Not enough data available.</p>'}
       </div>
     </article>
   `;
@@ -2535,7 +2591,7 @@ function renderOpenItems() {
         if (getOpenItemDetailTab(item.id) === "overview") {
           renderDetailPanel();
         }
-        window.alert(error.message || "No se pudo guardar el open item owner.");
+        window.alert(error.message || "Failed to save the Open Item owner.");
       }
     };
 
@@ -2577,7 +2633,7 @@ function renderOpenItems() {
         }
         openItemEditModeById.delete(item.id);
         renderOpenItems();
-        window.alert(error.message || "No se pudo actualizar el Open Item.");
+        window.alert(error.message || "Failed to update the Open Item.");
       }
     };
 
@@ -2793,12 +2849,12 @@ function renderOpenItems() {
             Object.assign(state, payload.state);
           });
           validationState.attemptedSave = false;
-          evaluationSaveStatusById.set(item.id, "Dato actualizado");
+          evaluationSaveStatusById.set(item.id, "Evaluation updated");
           renderReferencePanels();
           renderOpenItems();
-          showAppToast("Dato actualizado");
+          showAppToast("Evaluation updated");
         } catch (error) {
-          window.alert(error.message || "No se pudo guardar la evaluacion.");
+          window.alert(error.message || "Failed to save the evaluation.");
         }
       });
 
@@ -2942,7 +2998,7 @@ function renderOpenItems() {
                 <option value="reject">Reject</option>
                 <option value="needs-info">Needs info</option>
               </select>
-              <input name="comment" placeholder="Comentario del voto" />
+              <input name="comment" placeholder="Vote comment" />
               <button type="submit"${votingPermission.canVote ? "" : " disabled"}>Submit vote</button>
             </form>
             ${votingPermission.message ? `<p class="meta-line">${escapeHtml(votingPermission.message)}</p>` : ""}
@@ -2975,9 +3031,9 @@ function renderOpenItems() {
             });
             renderReferencePanels();
             renderOpenItems();
-            showAppToast("Dato actualizado");
+            showAppToast("Vote submitted");
           } catch (error) {
-            window.alert(error.message || "No se pudo guardar el voto.");
+            window.alert(error.message || "Failed to save the vote.");
           }
         });
       } else if (currentTab === "evaluation") {
@@ -3109,7 +3165,7 @@ function renderOpenItems() {
                   ownerSummary.textContent = formatOwnerLine(item) || `Source: ${item.sourceRef || "N/A"}`;
                 }
               },
-              "Sin coincidencias en el directorio de empleados.",
+              "No matching employee directory entries were found.",
               { requireEmail: true },
             );
           });
@@ -3160,7 +3216,7 @@ function renderOpenItems() {
   };
 
   if (!availableStatusTabs.length && !effectiveVisibleItems.length) {
-    openItemsList.innerHTML = "<p class=\"meta-line\">No hay open items activos.</p>";
+    openItemsList.innerHTML = "<p class=\"meta-line\">There are no active Open Items.</p>";
     return;
   }
 
@@ -3228,6 +3284,13 @@ function setChangeManagerDrawerVisibility(visible) {
     return;
   }
   changeManagerDrawer.hidden = !visible;
+}
+
+function setEmailModeDrawerVisibility(visible) {
+  if (!emailModeDrawer) {
+    return;
+  }
+  emailModeDrawer.hidden = !visible;
 }
 
 function renderChangeManagerView() {
@@ -3356,14 +3419,14 @@ function buildDailyReportText(prerequisite) {
     .map((item) => `- ${item.id}: ${item.title} | Impacto: ${impactedAreaNames(item)}`);
 
   return [
-    `Fecha: ${today}`,
-    `Prerequisito: ${prerequisite.label}`,
+    `Date: ${today}`,
+    `Prerequisite: ${prerequisite.label}`,
     "",
-    "Votaciones nuevas del dia:",
-    todaysVotes.length ? todaysVotes.join("\n") : "- Sin votaciones nuevas",
+    "New votes today:",
+    todaysVotes.length ? todaysVotes.join("\n") : "- No new votes",
     "",
-    "Lista propuesta para sesion CCB:",
-    ccbAgenda.length ? ccbAgenda.join("\n") : "- Sin temas pendientes",
+    "Suggested CCB session agenda:",
+    ccbAgenda.length ? ccbAgenda.join("\n") : "- No pending agenda items",
   ].join("\n");
 }
 
@@ -3431,9 +3494,9 @@ function renderDailyReport(prerequisite) {
   dailyReport.innerHTML = `
     <div class="daily-report-shell">
       <div class="daily-report-meta">
-        <span><strong>Fecha:</strong> ${escapeHtml(report.date)}</span>
-        <span><strong>Prerequisito:</strong> ${escapeHtml(report.prerequisite.label)}</span>
-        <span><strong>Votaciones nuevas:</strong> ${report.todaysVotes.length}</span>
+        <span><strong>Date:</strong> ${escapeHtml(report.date)}</span>
+        <span><strong>Prerequisite:</strong> ${escapeHtml(report.prerequisite.label)}</span>
+        <span><strong>New votes:</strong> ${report.todaysVotes.length}</span>
         <span><strong>Tickets CCB:</strong> ${report.ccbAgenda.length}</span>
       </div>
       ${report.todaysVotes.length ? `
@@ -3445,7 +3508,7 @@ function renderDailyReport(prerequisite) {
             </div>
           `).join("")}
         </div>
-      ` : "<p class=\"meta-line\">Sin votaciones nuevas hoy.</p>"}
+      ` : "<p class=\"meta-line\">No new votes today.</p>"}
       ${selectedAgendaItem ? `
         <div class="daily-report-tabs" role="tablist" aria-label="Agenda CCB">
           ${report.ccbAgenda.map((item) => `
@@ -3471,18 +3534,18 @@ function renderDailyReport(prerequisite) {
             <div class="daily-report-column">
               <p class="field-label">Impacto</p>
               <div class="daily-report-chip-list">
-                ${(selectedAgendaItem.impactedAreas.length ? selectedAgendaItem.impactedAreas : ["Sin areas"]).map((area) => `<span class="chip">${escapeHtml(area)}</span>`).join("")}
+                ${(selectedAgendaItem.impactedAreas.length ? selectedAgendaItem.impactedAreas : ["No areas"]).map((area) => `<span class="chip">${escapeHtml(area)}</span>`).join("")}
               </div>
             </div>
             <div class="daily-report-column">
-              <p class="field-label">Pendientes</p>
+              <p class="field-label">Pending</p>
               <div class="daily-report-chip-list">
-                ${(selectedAgendaItem.pendingAreas.length ? selectedAgendaItem.pendingAreas : ["Sin pendientes"]).map((area) => `<span class="chip">${escapeHtml(area)}</span>`).join("")}
+                ${(selectedAgendaItem.pendingAreas.length ? selectedAgendaItem.pendingAreas : ["No pending areas"]).map((area) => `<span class="chip">${escapeHtml(area)}</span>`).join("")}
               </div>
             </div>
           </div>
         </article>
-      ` : "<p class=\"meta-line\">Sin temas pendientes para sesion CCB.</p>"}
+      ` : "<p class=\"meta-line\">No pending agenda items for the CCB session.</p>"}
     </div>
   `;
 
@@ -3505,8 +3568,8 @@ function derivePrerequisiteLocally() {
   if (blockedItems.length) {
     return {
       status: "blocked",
-      label: "No cumple prerequisito",
-      detail: "Existen cambios sustanciales abiertos con aprobaciones pendientes.",
+      label: "PREREQUISITE NOT MET",
+      detail: "There are substantial open changes with pending approvals.",
       blockedItems: blockedItems.map((item) => item.id),
     };
   }
@@ -3514,16 +3577,16 @@ function derivePrerequisiteLocally() {
   if (substantialItems.length) {
     return {
       status: "review",
-      label: "Requiere revision",
-      detail: "Existen cambios sustanciales abiertos ya aprobados por las areas impactadas.",
+      label: "PENDING REVIEW",
+      detail: "There are substantial open changes that already have the required impacted-area approvals.",
       blockedItems: [],
     };
   }
 
   return {
     status: "clear",
-    label: "Cumple prerequisito",
-    detail: "No existen cambios sustanciales abiertos.",
+    label: "PREREQUISITE MET",
+    detail: "There are no substantial open changes.",
     blockedItems: [],
   };
 }
@@ -3546,7 +3609,7 @@ async function saveState() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state),
     });
-    const payload = await parseApiResponse(response, "No se pudo guardar el estado.");
+    const payload = await parseApiResponse(response, "Failed to save changes.");
     Object.assign(state, payload.state);
     refreshDerivedViews();
     await loadPreSessionDashboard();
@@ -3572,10 +3635,10 @@ async function saveStateSilently() {
 async function loadState() {
   const response = await fetch(apiUrl("/api/state"));
   if (response.status === 401) {
-    showAuthOnly("Inicia sesion con Google para continuar.");
+    showAuthOnly("Sign in with Google to continue.");
     return;
   }
-  const payload = await parseApiResponse(response, "No se pudo cargar el estado.");
+  const payload = await parseApiResponse(response, "Failed to load the app state.");
   Object.assign(state, payload.state);
   renderReferencePanels();
   renderPrerequisite(payload.prerequisite);
@@ -3597,7 +3660,7 @@ async function loadEmployeeDirectory() {
   if (response.status === 401) {
     return;
   }
-  const payload = await parseApiResponse(response, "No se pudo cargar el directorio de empleados.");
+  const payload = await parseApiResponse(response, "Failed to load the employee directory.");
   importedContacts = Array.isArray(payload.contacts) ? payload.contacts : [];
   renderContactSuggestions();
   renderEmployeesImportStatus(payload);
@@ -3608,7 +3671,7 @@ async function loadPreSessionDashboard() {
   if (response.status === 401) {
     return;
   }
-  const payload = await parseApiResponse(response, "No se pudo cargar la vista de pre-sesion.");
+  const payload = await parseApiResponse(response, "Failed to load the pre-session view.");
   preSessionDashboard = payload;
   renderPreSessionDashboard();
 }
@@ -3624,6 +3687,7 @@ function showApp(user) {
   appShell.classList.remove("app-hidden");
   currentUser.textContent = user ? `${user.name} · ${user.email}` : "";
   renderGoogleSheetsUserAuthStatus();
+  renderEmailModeUi();
 }
 
 async function loadAuthConfig() {
@@ -3640,10 +3704,10 @@ async function loadAuthConfig() {
     return true;
   }
 
-  showAuthOnly(`Acceso limitado a @${authConfig.allowedDomain}`);
+  showAuthOnly(`Restricted access for @${authConfig.allowedDomain}`);
 
   if (!authConfig.googleClientId) {
-    authStatus.textContent = "Falta configurar GOOGLE_CLIENT_ID en el servidor.";
+    authStatus.textContent = "GOOGLE_CLIENT_ID is not configured on the server.";
     return false;
   }
 
@@ -3665,12 +3729,49 @@ async function loadAuthConfig() {
   return false;
 }
 
+async function loadEmailModeStatus() {
+  const response = await fetch(apiUrl("/api/email-mode"));
+  if (response.status === 401) {
+    return;
+  }
+  emailModeStatus = await parseApiResponse(response, "Failed to load the email delivery mode.");
+  renderEmailModeUi();
+}
+
+async function updateEmailMode(mode) {
+  const requestedMode = String(mode || "").trim().toLowerCase() === "live" ? "live" : "test";
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
+  if (requestedMode === (emailModeStatus?.mode || "test")) {
+    renderEmailModeUi();
+    return;
+  }
+  if (requestedMode === "live") {
+    const confirmed = window.confirm("You are about to send future notifications to real assigned owners. Continue?");
+    if (!confirmed) {
+      return;
+    }
+  }
+  const response = await fetch(apiUrl("/api/email-mode"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: requestedMode }),
+  });
+  emailModeStatus = await parseApiResponse(response, "Failed to update the email delivery mode.");
+  renderReferencePanels();
+  closeAdminMenu();
+  setEmailModeDrawerVisibility(false);
+  showAppToast(requestedMode === "live" ? "Live emails active" : "Test emails active");
+}
+
 async function loadGoogleSheetsUserAuthStatus() {
   const response = await fetch(apiUrl("/api/google-sheets-auth/status"));
   if (response.status === 401) {
     return;
   }
-  const payload = await parseApiResponse(response, "No se pudo consultar el estado de Google Sheets OAuth.");
+  const payload = await parseApiResponse(response, "Failed to check Google Sheets OAuth status.");
   authConfig = {
     ...(authConfig || {}),
     googleSheetsAuth: payload,
@@ -3679,7 +3780,7 @@ async function loadGoogleSheetsUserAuthStatus() {
 }
 
 async function handleGoogleCredential(response) {
-  authStatus.textContent = "Validando acceso...";
+  authStatus.textContent = "Validating access...";
   const authResponse = await fetch(apiUrl("/api/auth/google"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3688,11 +3789,12 @@ async function handleGoogleCredential(response) {
 
   const payload = await authResponse.json();
   if (!authResponse.ok) {
-    showAuthOnly(payload.detail || payload.error || "No se pudo autenticar.");
+    showAuthOnly(payload.detail || payload.error || "Authentication failed.");
     return;
   }
 
   showApp(payload.user);
+  await loadEmailModeStatus();
   await loadState();
   await loadLiveSyncConfig();
 }
@@ -3722,8 +3824,8 @@ function updateLiveSyncSourceUi() {
   const usesGoogleSheets = liveSyncSourceType.value === "google-sheets";
   liveSyncSourceUrl.disabled = usesGoogleSheets;
   liveSyncSourceUrl.placeholder = usesGoogleSheets
-    ? "No se requiere URL: usa Google Sheets API con service account"
-    : "https://script.google.com/... o URL CSV publicada";
+    ? "No URL required: uses the Google Sheets API with a service account"
+    : "https://script.google.com/... or a published CSV URL";
 }
 
 async function loadLiveSyncConfig() {
@@ -3750,7 +3852,7 @@ function showGoogleSheetsOAuthResultFromQuery() {
 }
 
 async function applyImportedPayload(response) {
-  const payload = await parseApiResponse(response, "No se pudo sincronizar la informacion.");
+  const payload = await parseApiResponse(response, "Failed to synchronize data.");
   Object.assign(state, payload.state);
   isStateLoaded = true;
   renderReferencePanels();
@@ -3821,7 +3923,7 @@ openItemForm.addEventListener("submit", async (event) => {
   } catch (error) {
     state.openItems = state.openItems.filter((item) => item !== nextOpenItem);
     refreshDerivedViews();
-    window.alert(error.message || "No se pudo crear el open item en Google Sheets.");
+    window.alert(error.message || "Failed to create the Open Item in Google Sheets.");
   }
 });
 
@@ -3833,9 +3935,39 @@ document.getElementById("save-state").addEventListener("click", async () => {
   try {
     await saveState();
     closeAdminMenu();
-    showAppToast("Dato actualizado");
+    showAppToast("Changes saved");
   } catch (error) {
-    window.alert(error.message || "No se pudo guardar el estado.");
+    window.alert(error.message || "Failed to save changes.");
+  }
+});
+
+document.getElementById("open-email-mode-drawer")?.addEventListener("click", () => {
+  if (!isAdminOverrideUser()) {
+    notifyNotAuthorized();
+    return;
+  }
+  closeAdminMenu();
+  renderEmailModeUi();
+  setEmailModeDrawerVisibility(true);
+});
+
+emailModeTestButton?.addEventListener("click", async () => {
+  try {
+    await withGlobalBusy(async () => {
+      await updateEmailMode("test");
+    });
+  } catch (error) {
+    window.alert(error.message || "Failed to enable test email mode.");
+  }
+});
+
+emailModeLiveButton?.addEventListener("click", async () => {
+  try {
+    await withGlobalBusy(async () => {
+      await updateEmailMode("live");
+    });
+  } catch (error) {
+    window.alert(error.message || "Failed to enable live owner emails.");
   }
 });
 
@@ -3888,7 +4020,7 @@ document.getElementById("load-seed").addEventListener("click", async () => {
     });
     closeAdminMenu();
   } catch (error) {
-    window.alert(error.message || "No se pudo restaurar la demo.");
+    window.alert(error.message || "Failed to restore the demo data.");
   }
 });
 
@@ -3924,20 +4056,20 @@ document.getElementById("open-debug-tools")?.addEventListener("click", () => {
 
 document.getElementById("sync-google-sheet").addEventListener("click", async () => {
   try {
-    sourceStatus.textContent = "Sincronizando con la fuente configurada...";
+    sourceStatus.textContent = "Synchronizing with the configured source...";
     const response = await fetch(apiUrl("/api/import/google-sheet-snapshot"), { method: "POST" });
     await applyImportedPayload(response);
   } catch (error) {
     sourceStatus.dataset.mode = "local";
-    sourceStatus.innerHTML = `<strong>Error de sincronizacion:</strong> ${error.message || "No se pudo sincronizar con Google Sheets."}`;
-    window.alert(error.message || "No se pudo sincronizar con Google Sheets.");
+    sourceStatus.innerHTML = `<strong>Sync error:</strong> ${error.message || "Failed to synchronize with Google Sheets."}`;
+    window.alert(error.message || "Failed to synchronize with Google Sheets.");
   }
 });
 
 document.getElementById("import-csv-button").addEventListener("click", async () => {
   const file = csvFileInput.files?.[0];
   if (!file) {
-    window.alert("Selecciona primero el archivo CSV exportado desde Open Item List.");
+    window.alert("Select the exported Open Item List CSV file first.");
     return;
   }
 
@@ -3953,7 +4085,7 @@ document.getElementById("import-csv-button").addEventListener("click", async () 
 
   if (!response.ok) {
     const errorPayload = await response.json();
-    window.alert(errorPayload.detail || errorPayload.error || "No se pudo importar el CSV.");
+    window.alert(errorPayload.detail || errorPayload.error || "Failed to import the CSV file.");
     return;
   }
 
@@ -3964,12 +4096,12 @@ document.getElementById("import-csv-button").addEventListener("click", async () 
 document.getElementById("import-employees-csv-button").addEventListener("click", async () => {
   const file = employeesCsvFileInput.files?.[0];
   if (!file) {
-    window.alert("Selecciona primero el CSV de empleados.");
+    window.alert("Select the employee CSV file first.");
     return;
   }
 
   employeesImportStatus.dataset.mode = "local";
-  employeesImportStatus.innerHTML = "<strong>Importando:</strong> leyendo directorio de empleados...";
+  employeesImportStatus.innerHTML = "<strong>Importing:</strong> reading employee directory...";
 
   try {
     const csvText = await file.text();
@@ -3981,7 +4113,7 @@ document.getElementById("import-employees-csv-button").addEventListener("click",
         fileName: file.name,
       }),
     });
-    const payload = await parseApiResponse(response, "No se pudo importar el CSV de empleados.");
+    const payload = await parseApiResponse(response, "Failed to import the employee CSV file.");
     importedContacts = Array.isArray(payload.contacts) ? payload.contacts : [];
     renderContactSuggestions();
     renderEmployeesImportStatus(payload);
@@ -3989,8 +4121,8 @@ document.getElementById("import-employees-csv-button").addEventListener("click",
     employeesCsvFileInput.value = "";
   } catch (error) {
     employeesImportStatus.dataset.mode = "local";
-    employeesImportStatus.innerHTML = `<strong>Error:</strong> ${error.message || "No se pudo importar el CSV."}`;
-    window.alert(error.message || "No se pudo importar el CSV de empleados.");
+    employeesImportStatus.innerHTML = `<strong>Error:</strong> ${error.message || "Failed to import the CSV file."}`;
+    window.alert(error.message || "Failed to import the employee CSV file.");
   }
 });
 
@@ -3999,42 +4131,42 @@ document.getElementById("clear-employees-button").addEventListener("click", asyn
     const response = await fetch(apiUrl("/api/employees/clear"), {
       method: "POST",
     });
-    const payload = await parseApiResponse(response, "No se pudo limpiar el directorio de empleados.");
+    const payload = await parseApiResponse(response, "Failed to clear the employee directory.");
     importedContacts = [];
     renderContactSuggestions();
     renderEmployeesImportStatus(payload);
     renderAreas();
     employeesCsvFileInput.value = "";
   } catch (error) {
-    window.alert(error.message || "No se pudo limpiar el directorio de empleados.");
+    window.alert(error.message || "Failed to clear the employee directory.");
   }
 });
 
 document.getElementById("run-presession-job").addEventListener("click", async () => {
   try {
-    preSessionJobStatus.textContent = "Ejecutando job de solicitudes de pre-sesion...";
+    preSessionJobStatus.textContent = "Running the pre-session request job...";
     const response = await fetch(apiUrl("/api/pre-session/job"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sendEmails: true }),
     });
-    const payload = await parseApiResponse(response, "No se pudo ejecutar el job de pre-sesion.");
+    const payload = await parseApiResponse(response, "Failed to run the pre-session job.");
     Object.assign(state, payload.state);
     preSessionDashboard = payload.dashboard;
     renderPreSessionDashboard();
     preSessionJobStatus.textContent = payload.notifications.length
       ? payload.notifications.map((entry) => {
-          const modeLabel = entry.sent ? "enviado" : entry.deliveryMode === "preview" ? "preview" : "pendiente";
-          const targetSuffix = entry.deliveryTarget && entry.deliveryTarget !== entry.ownerEmail
-            ? ` | destino prueba: ${entry.deliveryTarget}`
+          const modeLabel = entry.sent ? entry.recipientMode || "sent" : entry.deliveryMode === "preview" ? "preview" : "pending";
+          const targetSuffix = entry.recipientMode === "test" && entry.deliveryTarget && entry.deliveryTarget !== entry.ownerEmail
+            ? ` | test target: ${entry.deliveryTarget}`
             : "";
           const suffix = entry.error ? ` | error: ${entry.error}` : "";
           return `- ${entry.ownerEmail}: ${entry.pendingCount} item(s) | ${modeLabel}${targetSuffix}${suffix}`;
         }).join("\n")
-      : "No habia owners con solicitudes pendientes.";
+      : "There were no owners with pending requests.";
   } catch (error) {
-    preSessionJobStatus.textContent = `Error: ${error.message || "No se pudo ejecutar el job."}`;
-    window.alert(error.message || "No se pudo ejecutar el job de pre-sesion.");
+    preSessionJobStatus.textContent = `Error: ${error.message || "Failed to run the job."}`;
+    window.alert(error.message || "Failed to run the pre-session job.");
   }
 });
 
@@ -4050,10 +4182,10 @@ document.getElementById("save-live-sync").addEventListener("click", async () => 
         intervalMs: Number(liveSyncIntervalMs.value || 300000),
       }),
     });
-    const payload = await parseApiResponse(response, "No se pudo guardar la configuracion de Live Sync.");
+    const payload = await parseApiResponse(response, "Failed to save the Live Sync configuration.");
     renderLiveSyncStatus(payload);
   } catch (error) {
-    window.alert(error.message || "No se pudo guardar la configuracion de Live Sync.");
+    window.alert(error.message || "Failed to save the Live Sync configuration.");
   }
 });
 
@@ -4089,10 +4221,10 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
   try {
     const response = await fetch(apiUrl("/api/live-sync/run"), { method: "POST" });
     if (response.status === 401) {
-      showAuthOnly("Tu sesion expiro. Inicia sesion de nuevo.");
+      showAuthOnly("Your session expired. Sign in again.");
       return;
     }
-    const payload = await parseApiResponse(response, "No se pudo ejecutar la sincronizacion.");
+    const payload = await parseApiResponse(response, "Failed to run the synchronization.");
     renderLiveSyncStatus(payload);
     Object.assign(state, payload.state);
     renderReferencePanels();
@@ -4103,7 +4235,7 @@ document.getElementById("run-live-sync").addEventListener("click", async () => {
     renderSummaryDashboard(payload.prerequisite);
     await loadPreSessionDashboard();
   } catch (error) {
-    window.alert(error.message || "No se pudo ejecutar la sincronizacion.");
+    window.alert(error.message || "Failed to run the synchronization.");
   }
 });
 
@@ -4116,6 +4248,12 @@ openNewItemDrawerButton.addEventListener("click", () => {
 document.querySelectorAll("[data-new-item-close]").forEach((button) => {
   button.addEventListener("click", () => {
     setOpenItemDrawerVisibility(false);
+  });
+});
+
+document.querySelectorAll("[data-email-mode-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setEmailModeDrawerVisibility(false);
   });
 });
 
@@ -4149,22 +4287,25 @@ changeManagerForm?.addEventListener("submit", async (event) => {
     setChangeManagerDrawerVisibility(false);
     renderOpenItems();
     renderSummaryDashboard(derivePrerequisiteLocally());
-    const notificationStatus = result?.notification?.status || "";
-    if (notificationStatus === "override-sent") {
-      showAppToast(result?.notification?.changes ? "Tracking updated. Debug email sent to override recipient." : "Tracking created. Debug email sent to override recipient.");
-    } else if (notificationStatus === "sent") {
-      showAppToast(result?.notification?.changes ? "Tracking updated and owner notified." : "Tracking created and owner notified.");
+    const notification = result?.notification || {};
+    const notificationStatus = notification.status || "";
+    if (notificationStatus === "test-sent") {
+      showAppToast(notification.changes ? "Tracking updated. Test email sent to override recipient." : "Tracking saved. Test email sent to override recipient.");
+    } else if (notificationStatus === "live-sent") {
+      showAppToast(notification.changes ? "Tracking updated and owner notified." : "Tracking saved and owner notified.");
     } else if (notificationStatus === "missing-owner-email") {
-      showAppToast("Tracking saved, but no owner email was found.");
+      showAppToast(`Tracking saved, but no owner email was found for ${notification.ownerName || "the assigned owner"}.`);
+    } else if (notificationStatus === "test-mode-missing-override") {
+      showAppToast("Test email mode is active but PRESESSION_EMAIL_OVERRIDE is not configured.");
     } else if (notificationStatus === "no-changes") {
       showAppToast("No changes to notify.");
     } else if (notificationStatus === "email-failed") {
       showAppToast("Tracking saved, but the email notification failed.");
     } else {
-      showAppToast("Dato actualizado");
+      showAppToast("Tracking updated");
     }
   } catch (error) {
-    window.alert(error.message || "No se pudo guardar el implementation tracking.");
+    window.alert(error.message || "Failed to save implementation tracking.");
   }
 });
 
@@ -4208,21 +4349,23 @@ document.getElementById("connect-google-sheets-user").addEventListener("click", 
 document.getElementById("disconnect-google-sheets-user").addEventListener("click", async () => {
   try {
     const response = await fetch(apiUrl("/api/google-sheets-auth/disconnect"), { method: "POST" });
-    const payload = await parseApiResponse(response, "No se pudo desconectar Google Sheets OAuth.");
+    const payload = await parseApiResponse(response, "Failed to disconnect Google Sheets OAuth.");
     authConfig = {
       ...(authConfig || {}),
       googleSheetsAuth: payload.googleSheetsAuth,
     };
     renderGoogleSheetsUserAuthStatus(payload.googleSheetsAuth);
   } catch (error) {
-    window.alert(error.message || "No se pudo desconectar Google Sheets OAuth.");
+    window.alert(error.message || "Failed to disconnect Google Sheets OAuth.");
   }
 });
 
 document.getElementById("logout-button").addEventListener("click", async () => {
   await fetch(apiUrl("/api/auth/logout"), { method: "POST" });
-  showAuthOnly(`Acceso limitado a @${authConfig?.allowedDomain || "conceivable.life"}`);
+  showAuthOnly(`Restricted access for @${authConfig?.allowedDomain || "conceivable.life"}`);
   currentUser.textContent = "";
+  emailModeStatus = null;
+  renderEmailModeUi();
 });
 
 (async () => {
@@ -4233,6 +4376,7 @@ document.getElementById("logout-button").addEventListener("click", async () => {
     renderReferencePanels();
     activateTab(deepLinkState.tab || "summary");
     if (hasSession) {
+      await loadEmailModeStatus();
       await loadEmployeeDirectory();
       await loadGoogleSheetsUserAuthStatus();
       await loadState();
@@ -4240,6 +4384,6 @@ document.getElementById("logout-button").addEventListener("click", async () => {
     }
   } catch (error) {
     sourceStatus.dataset.mode = "local";
-    sourceStatus.innerHTML = `<strong>Error inicial:</strong> ${error.message || "No se pudo cargar la app."}`;
+    sourceStatus.innerHTML = `<strong>Startup error:</strong> ${error.message || "Failed to load the app."}`;
   }
 })();

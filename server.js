@@ -9,7 +9,9 @@ require("dotenv").config();
 const PORT = process.env.PORT || 3000;
 const BASE_PATH = normalizeBasePath(process.env.BASE_PATH || "");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const LOGO_DIR = path.join(__dirname, "logo");
 const DATA_DIR = path.join(__dirname, "data");
+const PUBLIC_APP_ORIGIN = String(process.env.PUBLIC_APP_ORIGIN || "https://repo-validation.conceivable.life").trim().replace(/\/+$/, "");
 const SOURCE_SPREADSHEET_ID = process.env.SOURCE_SPREADSHEET_ID || "1G6YNnnIrqEH_oIgq95bXmrER2lUjPYtkCeV5zwaXRms";
 const SOURCE_SHEET_NAME = process.env.SOURCE_SHEET_NAME || "Open Item List";
 const SOURCE_SHEET_HEADER_ROW = Number(process.env.SOURCE_SHEET_HEADER_ROW || 0);
@@ -33,6 +35,7 @@ const EMPLOYEE_DIRECTORY_FILE = path.join(DATA_DIR, "employee-directory.json");
 const GOOGLE_SNAPSHOT_FILE = path.join(DATA_DIR, "google-open-items-snapshot.json");
 const LIVE_SYNC_CONFIG_FILE = path.join(DATA_DIR, "live-sync-config.json");
 const AUTH_CONFIG_FILE = path.join(DATA_DIR, "auth-config.json");
+const EMAIL_MODE_CONFIG_FILE = path.join(DATA_DIR, "email-mode.json");
 const USER_GOOGLE_OAUTH_TOKEN_FILE = path.join(DATA_DIR, "google-user-oauth-token.json");
 const USER_GOOGLE_OAUTH_TOKEN_RUNTIME_FILE = path.join(DATA_DIR, "google-user-oauth-token.runtime.json");
 const SESSION_COOKIE_NAME = "ccb_session";
@@ -243,6 +246,9 @@ const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
 };
@@ -262,6 +268,121 @@ let liveSyncStatus = {
 let liveSyncTimer = null;
 const sessionSecret = process.env.SESSION_SECRET || "local-dev-secret-change-me";
 const googleClient = new OAuth2Client();
+
+function getBrandLogoFileName() {
+  try {
+    const files = fs.readdirSync(LOGO_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.(png|jpg|jpeg)$/i.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+    return files[0] || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function getBrandLogoPublicPath() {
+  const fileName = getBrandLogoFileName();
+  return fileName ? `/logo/${encodeURIComponent(fileName)}` : "";
+}
+
+function getBrandLogoAppPath() {
+  const publicPath = getBrandLogoPublicPath();
+  return publicPath ? withBasePath(publicPath) : "";
+}
+
+function getBrandLogoDocumentSrc() {
+  return getBrandLogoAppPath() || "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+}
+
+function getBrandLogoAbsoluteUrl() {
+  const publicPath = getBrandLogoPublicPath();
+  return publicPath ? `${PUBLIC_APP_ORIGIN}${publicPath}` : "";
+}
+
+const EMAIL_LOGO_CID = "conceivable-logo";
+
+function getBrandLogoFilePath() {
+  const fileName = getBrandLogoFileName();
+  return fileName ? path.join(LOGO_DIR, fileName) : "";
+}
+
+function getEmailLogoAttachment() {
+  const fileName = getBrandLogoFileName();
+  const filePath = getBrandLogoFilePath();
+  const exists = Boolean(filePath) && fs.existsSync(filePath);
+  if (!fileName || !exists) {
+    return null;
+  }
+  return {
+    filename: fileName,
+    path: filePath,
+    cid: EMAIL_LOGO_CID,
+    contentType: "image/png",
+  };
+}
+
+function hasEmailLogoAsset() {
+  return Boolean(getEmailLogoAttachment());
+}
+
+function isGlobalLogoPath(pathname) {
+  return typeof pathname === "string" && pathname.startsWith("/logo/");
+}
+
+function renderEmailBrandHeader(title, eyebrow = "Conceivable") {
+  const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
+  const hasEmbeddedLogo = hasEmailLogoAsset();
+  return `
+    <tr>
+      <td style="padding:28px 22px 18px;border-bottom:1px solid #EEF2F6;background:#FFFFFF;">
+        ${hasEmbeddedLogo ? `
+          <img
+            src="cid:${EMAIL_LOGO_CID}"
+            width="220"
+            alt="Conceivable Life Sciences"
+            style="display:block;width:220px;max-width:220px;height:auto;border:0;outline:none;text-decoration:none;margin:0 0 10px 0;"
+          />
+        ` : `
+          <div style="font-family:${sansStack};font-size:18px;line-height:1.25;color:#111827;font-weight:700;letter-spacing:-0.02em;margin-bottom:10px;">
+            Conceivable Life Sciences
+          </div>
+        `}
+        <div style="font-family:${sansStack};font-size:14px;line-height:1.4;color:#475569;font-weight:700;letter-spacing:.02em;margin-bottom:8px;">Change Control Board</div>
+        <div style="font-family:${sansStack};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#C88A2D;font-weight:700;margin-bottom:4px;">${escapeHtmlEmail(eyebrow)}</div>
+        <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:700;letter-spacing:-0.02em;">${escapeHtmlEmail(title)}</div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderEmailShell({ title, eyebrow, introHtml, bodyHtml, ctaHref, ctaLabel = "Review Open Item", footerHtml = "" }) {
+  const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
+  return `
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:20px;background:#F8F6F1;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;margin:0 auto;border:1px solid #E8ECF1;border-radius:18px;background:#FFFFFF;overflow:hidden;">
+      ${renderEmailBrandHeader(title, eyebrow)}
+      <tr>
+        <td style="padding:20px 22px 22px;">
+          ${introHtml ? `<div style="font-family:${sansStack};font-size:14px;line-height:1.65;color:#334155;margin-bottom:16px;">${introHtml}</div>` : ""}
+          ${bodyHtml}
+          ${ctaHref ? `
+            <div style="padding-top:16px;">
+              <a href="${escapeHtmlEmail(ctaHref)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:14px;font-weight:600;padding:10px 16px;border-radius:999px;">${escapeHtmlEmail(ctaLabel)}</a>
+            </div>
+            <div style="font-family:${sansStack};font-size:12px;line-height:1.6;color:#6B7280;margin-top:10px;">
+              Fallback link: <a href="${escapeHtmlEmail(ctaHref)}" style="color:#0F2836;text-decoration:underline;">${escapeHtmlEmail(ctaHref)}</a>
+            </div>
+          ` : ""}
+          ${footerHtml ? `<div style="font-family:${sansStack};font-size:12px;line-height:1.6;color:#7C8797;margin-top:14px;">${footerHtml}</div>` : ""}
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
 
 function normalizeBasePath(value) {
   const raw = String(value || "").trim();
@@ -309,6 +430,95 @@ function readJson(filePath) {
 
 function writeJson(filePath, payload) {
   fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+}
+
+function normalizeEmailMode(value) {
+  return String(value || "").trim().toLowerCase() === "live" ? "live" : "test";
+}
+
+function loadEmailModeConfig() {
+  const fileConfig = readOptionalJson(EMAIL_MODE_CONFIG_FILE, {});
+  return {
+    mode: normalizeEmailMode(fileConfig.mode),
+    updatedAt: String(fileConfig.updatedAt || "").trim(),
+    updatedBy: normalizeEmail(String(fileConfig.updatedBy || "")),
+  };
+}
+
+function persistEmailModeConfig(nextConfig = {}, user = null) {
+  const payload = {
+    mode: normalizeEmailMode(nextConfig.mode),
+    updatedAt: new Date().toISOString(),
+    updatedBy: normalizeEmail(user?.email || ""),
+  };
+  writeJson(EMAIL_MODE_CONFIG_FILE, payload);
+  return payload;
+}
+
+function getEmailModeStatus() {
+  const config = loadEmailModeConfig();
+  const mode = normalizeEmailMode(config.mode);
+  return {
+    mode,
+    overrideEmail: PRESESSION_EMAIL_OVERRIDE,
+    effectiveRecipientBehavior: mode === "live" ? "actual" : "override",
+    updatedAt: config.updatedAt || "",
+    updatedBy: config.updatedBy || "",
+  };
+}
+
+function resolveNotificationRecipient(intendedRecipient) {
+  const normalizedIntendedRecipient = normalizeEmail(intendedRecipient || "");
+  const emailMode = getEmailModeStatus();
+
+  if (emailMode.mode === "live") {
+    if (!normalizedIntendedRecipient) {
+      return {
+        ok: false,
+        mode: "live",
+        status: "missing-owner-email",
+        intendedRecipient: "",
+        deliveryTarget: "",
+        footerText: "",
+        footerHtml: "",
+      };
+    }
+    return {
+      ok: true,
+      mode: "live",
+      status: "live-sent",
+      intendedRecipient: normalizedIntendedRecipient,
+      deliveryTarget: normalizedIntendedRecipient,
+      footerText: "",
+      footerHtml: "",
+    };
+  }
+
+  if (!PRESESSION_EMAIL_OVERRIDE) {
+    return {
+      ok: false,
+      mode: "test",
+      status: "test-mode-missing-override",
+      intendedRecipient: normalizedIntendedRecipient,
+      deliveryTarget: "",
+      footerText: "",
+      footerHtml: "",
+      error: "Test email mode is active but PRESESSION_EMAIL_OVERRIDE is not configured.",
+    };
+  }
+
+  const footerText = normalizedIntendedRecipient
+    ? `Test mode: this message was sent to the override address. Original intended recipient: ${normalizedIntendedRecipient}.`
+    : "Test mode: original intended recipient could not be resolved.";
+  return {
+    ok: true,
+    mode: "test",
+    status: "test-sent",
+    intendedRecipient: normalizedIntendedRecipient,
+    deliveryTarget: PRESESSION_EMAIL_OVERRIDE,
+    footerText,
+    footerHtml: escapeHtmlEmail(footerText),
+  };
 }
 
 function createDefaultState() {
@@ -433,11 +643,25 @@ function persistEmployeeDirectory(directory) {
 function buildKnownContactsDirectory(areas = []) {
   const contactsByEmail = new Map();
   const contactsByName = new Map();
+  const contactsByAlias = new Map();
   const contacts = [];
 
-  const pushContact = (name, email) => {
+  const pushAlias = (alias, contact) => {
+    const key = String(alias || "").trim().toLowerCase();
+    if (!key) {
+      return;
+    }
+    const existing = contactsByAlias.get(key) || [];
+    if (!existing.some((entry) => entry.email === contact.email && entry.name === contact.name)) {
+      existing.push(contact);
+      contactsByAlias.set(key, existing);
+    }
+  };
+
+  const pushContact = (name, email, metadata = {}) => {
     const normalizedName = String(name || "").trim();
-    const normalizedEmail = normalizeEmail(email);
+    const embeddedEmail = extractEmailAddress(normalizedName);
+    const normalizedEmail = normalizeEmail(email || embeddedEmail);
     if (!normalizedName && !normalizedEmail) {
       return;
     }
@@ -445,29 +669,51 @@ function buildKnownContactsDirectory(areas = []) {
     const contact = {
       name: normalizedName,
       email: normalizedEmail,
+      displayName: String(metadata.displayName || "").trim(),
+      area: String(metadata.area || "").trim(),
+      primaryArea: String(metadata.primaryArea || "").trim(),
+      source: String(metadata.source || "").trim(),
     };
 
     if (normalizedEmail && !contactsByEmail.has(normalizedEmail)) {
       contactsByEmail.set(normalizedEmail, contact);
     }
 
-    if (normalizedName) {
-      const key = normalizedName.toLowerCase();
+    const personKeys = new Set([
+      normalizedName ? normalizedName.toLowerCase() : "",
+      String(contact.displayName || "").trim().toLowerCase(),
+      ...buildPersonAliases(normalizedName, normalizedEmail),
+      ...buildPersonAliases(contact.displayName, normalizedEmail),
+    ].filter(Boolean));
+
+    personKeys.forEach((key) => {
       if (!contactsByName.has(key)) {
         contactsByName.set(key, contact);
       }
-    }
+      pushAlias(key, contact);
+    });
 
     contacts.push(contact);
   };
 
-  getEmployeeDirectory().contacts.forEach((contact) => pushContact(contact.name, contact.email));
-  areas.forEach((area) => pushContact(area.owner, area.email));
+  getEmployeeDirectory().contacts.forEach((contact) => pushContact(contact.name || contact.displayName, contact.email, {
+    displayName: contact.displayName || contact.name || "",
+    area: contact.area || "",
+    primaryArea: contact.primaryArea || "",
+    source: "employee-directory",
+  }));
+  areas.forEach((area) => pushContact(area.owner, area.email, {
+    displayName: area.owner || area.name || "",
+    area: area.id || area.name || "",
+    primaryArea: area.id || area.name || "",
+    source: "ccb-areas",
+  }));
 
   return {
     contacts,
     byEmail: contactsByEmail,
     byName: contactsByName,
+    byAlias: contactsByAlias,
   };
 }
 
@@ -477,12 +723,13 @@ function resolveContactByValue(value, contactsDirectory) {
     return null;
   }
 
-  const normalizedEmail = normalizeEmail(normalizedValue);
+  const normalizedEmail = extractEmailAddress(normalizedValue) || normalizeEmail(normalizedValue);
   if (contactsDirectory.byEmail.has(normalizedEmail)) {
     return contactsDirectory.byEmail.get(normalizedEmail);
   }
 
-  const exactNameMatch = contactsDirectory.byName.get(normalizedValue.toLowerCase());
+  const exactNameMatch = contactsDirectory.byName.get(normalizedValue.toLowerCase())
+    || contactsDirectory.byName.get(normalizePersonName(normalizedValue));
   if (exactNameMatch) {
     return exactNameMatch;
   }
@@ -492,24 +739,49 @@ function resolveContactByValue(value, contactsDirectory) {
     return null;
   }
 
+  const searchAliases = Array.from(new Set([
+    normalizedSearch,
+    ...buildPersonAliases(normalizedValue, normalizedEmail),
+  ].filter(Boolean)));
+  const aliasMatches = searchAliases
+    .flatMap((alias) => contactsDirectory.byAlias.get(alias) || [])
+    .filter((contact, index, collection) => collection.findIndex((entry) => entry.email === contact.email && entry.name === contact.name) === index);
+  if (aliasMatches.length === 1) {
+    return aliasMatches[0];
+  }
+
   const rankedMatches = (contactsDirectory.contacts || [])
     .map((contact) => {
-      const normalizedContactName = normalizeContactName(contact.name);
-      if (!normalizedContactName) {
+      const normalizedContactNames = new Set([
+        normalizeContactName(contact.name),
+        normalizeContactName(contact.displayName),
+        ...buildPersonAliases(contact.name, contact.email),
+        ...buildPersonAliases(contact.displayName, contact.email),
+      ].filter(Boolean));
+      if (!normalizedContactNames.size) {
         return null;
       }
 
-      if (normalizedContactName === normalizedSearch) {
-        return { score: 4, contact };
-      }
-      if (normalizedContactName.startsWith(`${normalizedSearch} `) || normalizedContactName.endsWith(` ${normalizedSearch}`)) {
-        return { score: 3, contact };
-      }
-      if (normalizedContactName.includes(` ${normalizedSearch} `) || normalizedContactName.startsWith(normalizedSearch) || normalizedContactName.endsWith(normalizedSearch)) {
-        return { score: 2, contact };
-      }
-      if (normalizedSearch.length >= 4 && normalizedContactName.includes(normalizedSearch)) {
-        return { score: 1, contact };
+      let bestScore = 0;
+      normalizedContactNames.forEach((normalizedContactName) => {
+        if (normalizedContactName === normalizedSearch) {
+          bestScore = Math.max(bestScore, 5);
+          return;
+        }
+        if (normalizedContactName.startsWith(`${normalizedSearch} `) || normalizedContactName.endsWith(` ${normalizedSearch}`)) {
+          bestScore = Math.max(bestScore, 4);
+          return;
+        }
+        if (normalizedContactName.includes(` ${normalizedSearch} `) || normalizedContactName.startsWith(normalizedSearch) || normalizedContactName.endsWith(normalizedSearch)) {
+          bestScore = Math.max(bestScore, 3);
+          return;
+        }
+        if (normalizedSearch.length >= 4 && normalizedContactName.includes(normalizedSearch)) {
+          bestScore = Math.max(bestScore, 2);
+        }
+      });
+      if (bestScore > 0) {
+        return { score: bestScore, contact };
       }
       return null;
     })
@@ -560,15 +832,15 @@ function normalizeImplementationStatus(value) {
   }
 
   if (normalized === "open") {
-    return "Open";
+    return "OPEN";
   }
 
   if (normalized === "in progress") {
-    return "In Progress";
+    return "IN PROGRESS";
   }
 
   if (normalized === "closed") {
-    return "Closed";
+    return "CLOSED";
   }
 
   return "";
@@ -961,7 +1233,7 @@ function persistUserGoogleOAuthToken(tokens) {
     }
   }
 
-  throw lastError || new Error("No se pudo guardar el token OAuth de Google.");
+  throw lastError || new Error("Failed to store the Google OAuth token.");
 }
 
 function isUserGoogleOAuthConfigured() {
@@ -1155,7 +1427,7 @@ async function verifyGoogleCredential(credential) {
   });
   const payload = ticket.getPayload();
   if (!payload) {
-    throw new Error("No se pudo leer el payload del token");
+    throw new Error("Failed to read the token payload.");
   }
 
   if (!payload.iss || !["accounts.google.com", "https://accounts.google.com"].includes(payload.iss)) {
@@ -1360,8 +1632,8 @@ function derivePrerequisiteStatus(state) {
   if (blockedItems.length > 0) {
     return {
       status: "blocked",
-      label: "No cumple prerequisito",
-      detail: "Hay cambios sustanciales abiertos sin aprobacion completa de las areas impactadas.",
+      label: "PREREQUISITE NOT MET",
+      detail: "There are substantial open changes without complete impacted-area approval.",
       blockedItems: blockedItems.map((item) => item.id),
     };
   }
@@ -1369,16 +1641,16 @@ function derivePrerequisiteStatus(state) {
   if (substantialOpenItems.length > 0) {
     return {
       status: "review",
-      label: "Requiere revision",
-      detail: "Hay cambios sustanciales abiertos, pero ya cuentan con aprobaciones suficientes.",
+      label: "PENDING REVIEW",
+      detail: "There are substantial open changes, but they already have sufficient approvals.",
       blockedItems: [],
     };
   }
 
   return {
     status: "clear",
-    label: "Cumple prerequisito",
-    detail: "No hay cambios sustanciales abiertos en el open item list.",
+    label: "PREREQUISITE MET",
+    detail: "There are no substantial open changes in the Open Item List.",
     blockedItems: [],
   };
 }
@@ -1509,14 +1781,66 @@ function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
-function normalizeContactName(value) {
-  return String(value || "")
+function extractEmailAddress(value) {
+  const match = String(value || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return normalizeEmail(match ? match[0] : "");
+}
+
+function normalizePersonName(value) {
+  const raw = String(value || "")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .trim();
+  if (!raw) {
+    return "";
+  }
+
+  const withoutEmail = raw
+    .replace(/<[^>]*@[A-Z0-9.-]+\.[A-Z]{2,}[^>]*>/gi, " ")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, " ")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\s+-\s+.*/g, " ");
+
+  return withoutEmail
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function normalizeContactName(value) {
+  return normalizePersonName(value);
+}
+
+function buildPersonAliases(name, email = "") {
+  const aliases = new Set();
+  const normalizedName = normalizePersonName(name);
+  if (normalizedName) {
+    aliases.add(normalizedName);
+    const parts = normalizedName.split(" ").filter(Boolean);
+    if (parts.length >= 2) {
+      aliases.add(`${parts[0][0]}${parts[parts.length - 1]}`);
+      aliases.add(parts[parts.length - 1]);
+      aliases.add(parts[0]);
+    }
+  }
+
+  const extractedEmail = extractEmailAddress(email || name);
+  if (extractedEmail) {
+    const localPart = extractedEmail.split("@")[0] || "";
+    const normalizedLocalPart = normalizePersonName(localPart.replace(/[._-]+/g, " "));
+    if (normalizedLocalPart) {
+      aliases.add(normalizedLocalPart);
+    }
+    if (localPart) {
+      aliases.add(localPart.toLowerCase());
+    }
+  }
+
+  return Array.from(aliases).filter(Boolean);
 }
 
 function isPreSessionCandidate(item) {
@@ -1766,7 +2090,7 @@ function buildPreSessionDashboard(state, user) {
 }
 
 function buildPreSessionEmailSubject(group) {
-  return `CCB pre-sesion: revision pendiente para ${group.pendingCount} open item${group.pendingCount === 1 ? "" : "s"}`;
+  return `CCB Pre-Session Review Pending: ${group.pendingCount} Open Item${group.pendingCount === 1 ? "" : "s"}`;
 }
 
 function buildAppDeepLink(params = {}) {
@@ -1801,11 +2125,99 @@ function buildTicketDeepLink(openItemId) {
   });
 }
 
-function resolveImplementationOwnerContact(item, state) {
-  const contactsDirectory = buildKnownContactsDirectory(state?.areas || []);
-  return resolveContactByValue(item.ownerEmail || item.ownerName, contactsDirectory)
-    || resolveContactByValue(item.ownerName, contactsDirectory)
-    || null;
+function resolveOwnerEmailForOpenItem(item, state) {
+  const areas = Array.isArray(state?.areas) ? state.areas : [];
+  const contactsDirectory = buildKnownContactsDirectory(areas);
+  const ownerRawValue = String(
+    item?.ownerEmail
+    || item?.ownerName
+    || item?.rawSheetRow?.Owner
+    || item?.rawSheetRow?.owner
+    || "",
+  ).trim();
+  const normalizedOwner = normalizePersonName(ownerRawValue || item?.ownerName || "");
+  const ownerAreaId = String(item?.ownerAreaId || item?.primaryArea || item?.rawSheetRow?.primaryArea || "").trim();
+  const impactedAreaIds = Array.isArray(item?.impactedAreaIds) ? item.impactedAreaIds.filter(Boolean) : [];
+  const debugBase = {
+    openItemId: String(item?.id || "").trim(),
+    ownerRawValue,
+    normalizedOwner,
+    primaryArea: ownerAreaId,
+    impactedAreas: impactedAreaIds,
+    emailMode: getEmailModeStatus().mode,
+    overrideConfigured: Boolean(PRESESSION_EMAIL_OVERRIDE),
+    availableOwnerMappingKeys: Array.from(contactsDirectory.byAlias.keys()).slice(0, 40),
+  };
+  const buildResult = (email, source, extra = {}) => ({
+    email: normalizeEmail(email),
+    source,
+    ownerName: String(extra.ownerName || item?.ownerName || ownerRawValue || "").trim(),
+    contact: extra.contact || null,
+    debug: {
+      ...debugBase,
+      matchedSource: source,
+      matchedValue: extra.matchedValue || "",
+    },
+  });
+
+  const directEmail = extractEmailAddress(item?.ownerEmail) || extractEmailAddress(ownerRawValue);
+  if (directEmail) {
+    return buildResult(directEmail, "open-item-email", {
+      matchedValue: item?.ownerEmail || ownerRawValue,
+      contact: resolveContactByValue(directEmail, contactsDirectory),
+    });
+  }
+
+  const employeeContact = resolveContactByValue(item?.ownerName || ownerRawValue, contactsDirectory);
+  if (employeeContact?.email) {
+    return buildResult(employeeContact.email, employeeContact.source === "ccb-areas" ? "area-owner-name" : "employee-directory-name", {
+      ownerName: employeeContact.displayName || employeeContact.name || item?.ownerName || "",
+      matchedValue: employeeContact.name || employeeContact.displayName || "",
+      contact: employeeContact,
+    });
+  }
+
+  const ownerAreaByName = areas.find((area) => normalizePersonName(area.owner) === normalizedOwner && normalizeEmail(area.email));
+  if (ownerAreaByName?.email) {
+    return buildResult(ownerAreaByName.email, "area-owner-name", {
+      ownerName: ownerAreaByName.owner || item?.ownerName || "",
+      matchedValue: ownerAreaByName.owner || ownerAreaByName.name || ownerAreaByName.id || "",
+      contact: ownerAreaByName,
+    });
+  }
+
+  const primaryArea = areas.find((area) => area.id === ownerAreaId || normalizePersonName(area.name) === normalizePersonName(ownerAreaId));
+  if (primaryArea?.email) {
+    return buildResult(primaryArea.email, "primary-area-owner-email", {
+      ownerName: primaryArea.owner || item?.ownerName || "",
+      matchedValue: primaryArea.id || primaryArea.name || "",
+      contact: primaryArea,
+    });
+  }
+
+  if (impactedAreaIds.length === 1) {
+    const impactedArea = areas.find((area) => area.id === impactedAreaIds[0]);
+    if (impactedArea?.email) {
+      return buildResult(impactedArea.email, "single-impacted-area-owner-email", {
+        ownerName: impactedArea.owner || item?.ownerName || "",
+        matchedValue: impactedArea.id || impactedArea.name || "",
+        contact: impactedArea,
+      });
+    }
+  }
+
+  console.warn("[owner-email-resolution-failed]", JSON.stringify(debugBase));
+  return {
+    email: "",
+    source: "",
+    ownerName: String(item?.ownerName || ownerRawValue || "").trim(),
+    contact: null,
+    debug: {
+      ...debugBase,
+      matchedSource: "",
+      matchedValue: "",
+    },
+  };
 }
 
 function formatImplementationFieldValue(value) {
@@ -1866,7 +2278,8 @@ function buildImplementationUpdateEmailSubject(item) {
   return `CCB Open Item Updated: ${item.id} - ${item.title}`;
 }
 
-function buildImplementationAssignedEmailBody(item, trackingData, owner, ticketLink, intendedRecipient = "", state = null) {
+function buildImplementationAssignedEmailBody(item, trackingData, owner, ticketLink, emailDelivery = {}, state = null) {
+  const intendedRecipient = emailDelivery.intendedRecipient || "";
   const impactedAreaNames = (item.impactedAreaIds || [])
     .map((areaId) => state?.areas?.find((area) => area.id === areaId)?.name || areaId)
     .filter(Boolean);
@@ -1895,14 +2308,15 @@ function buildImplementationAssignedEmailBody(item, trackingData, owner, ticketL
   if (String(trackingData.implementationNotes || "").trim()) {
     lines.push(`Implementation Notes: ${trackingData.implementationNotes}`);
   }
-  if (PRESESSION_EMAIL_OVERRIDE) {
-    lines.push("", `Debug mode: original intended recipient was ${intendedRecipient || "Not available"}.`);
+  if (emailDelivery.footerText) {
+    lines.push("", emailDelivery.footerText);
   }
-  lines.push("", "Please review the assigned item here:", ticketLink);
+  lines.push("", "Review the assigned item here:", ticketLink);
   return lines.join("\n");
 }
 
-function buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient = "") {
+function buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, owner, ticketLink, emailDelivery = {}) {
+  const intendedRecipient = emailDelivery.intendedRecipient || "";
   const lines = [
     `Hello ${owner?.name || item.ownerName || intendedRecipient || "Owner"},`,
     "",
@@ -1917,82 +2331,59 @@ function buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, o
     `Open Item: ${item.id} - ${item.title}`,
     `Current implementation status: ${formatImplementationFieldValue(afterTrackingData.status)}`,
   ];
-  if (PRESESSION_EMAIL_OVERRIDE) {
-    lines.push("", `Debug mode: original intended recipient was ${intendedRecipient || "Not available"}.`);
+  if (emailDelivery.footerText) {
+    lines.push("", emailDelivery.footerText);
   }
   lines.push("", "Review the item:", ticketLink);
   return lines.join("\n");
 }
 
-function buildImplementationAssignedEmailHtml(item, trackingData, owner, ticketLink, intendedRecipient = "", state = null) {
+function buildImplementationAssignedEmailHtml(item, trackingData, owner, ticketLink, emailDelivery = {}, state = null) {
+  const intendedRecipient = emailDelivery.intendedRecipient || "";
   const ownerName = owner?.name || item.ownerName || intendedRecipient || "Owner";
   const impactedAreaNames = (item.impactedAreaIds || [])
     .map((areaId) => state?.areas?.find((area) => area.id === areaId)?.name || areaId)
     .filter(Boolean);
   const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
-
-  return `
-<!doctype html>
-<html lang="en">
-  <body style="margin:0;padding:24px;background:#FDFCF9;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;margin:0 auto;border:1px solid #E2E8F0;border-radius:24px;background:#FFFFFF;overflow:hidden;">
+  const introHtml = `Hello ${escapeHtmlEmail(ownerName)},<br/>The following CCB-approved Open Item has been assigned to you for implementation tracking.`;
+  const bodyHtml = `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:6px;">
       <tr>
-        <td style="padding:26px 30px;border-bottom:1px solid #E2E8F0;">
-          <div style="font-family:${sansStack};font-size:28px;line-height:1;color:#111827;font-weight:800;letter-spacing:-0.04em;">
-            conceiv<span style="color:#C88A2D;">able</span>
-            <span style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#475569;font-weight:600;vertical-align:middle;">Life Sciences</span>
+        <td style="padding:16px 16px;border:1px solid #EDF1F5;border-radius:14px;background:#FBFCFD;">
+          <div style="font-family:${sansStack};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#7A8798;margin-bottom:6px;">${escapeHtmlEmail(item.id)}</div>
+          <div style="font-family:${sansStack};font-size:22px;line-height:1.25;color:#0F172A;font-weight:700;margin-bottom:10px;">${escapeHtmlEmail(item.title)}</div>
+          <div style="margin-bottom:12px;">
+            <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#F3F4F6;color:#334155;font-family:${sansStack};font-size:11px;font-weight:600;margin-right:6px;">${escapeHtmlEmail(item.ccbDecisionRecommendation || "APPROVE")}</span>
+            <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#FFF7ED;color:#B86A1D;font-family:${sansStack};font-size:11px;font-weight:600;margin-right:6px;">Score ${escapeHtmlEmail(item.ccbDecisionAverageScore == null ? "N/A" : Number(item.ccbDecisionAverageScore).toFixed(2))}</span>
+            <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#F8FAFC;color:#475569;font-family:${sansStack};font-size:11px;font-weight:600;">${escapeHtmlEmail(trackingData.status || "OPEN")}</span>
           </div>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:30px;">
-          <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#C88A2D;font-weight:800;margin-bottom:8px;">Implementation Tracking</div>
-          <div style="font-family:${sansStack};font-size:30px;line-height:1.1;color:#0F172A;font-weight:800;letter-spacing:-0.04em;margin-bottom:14px;">
-            Open Item Assigned for Implementation
-          </div>
-          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;margin-bottom:20px;">
-            Hello ${escapeHtmlEmail(ownerName)},<br/>
-            The following CCB-approved Open Item has been assigned to you for implementation tracking.
-          </div>
-
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:18px;">
-            <tr>
-              <td style="padding:20px 22px;border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;">
-                <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748B;margin-bottom:8px;">${escapeHtmlEmail(item.id)}</div>
-                <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:800;letter-spacing:-0.03em;margin-bottom:14px;">${escapeHtmlEmail(item.title)}</div>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#EFF6FF;color:#0F2836;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(item.ccbDecisionRecommendation || "APPROVE")}</span>
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#FFF7ED;color:#C88A2D;font-family:${sansStack};font-size:12px;font-weight:700;">Score ${escapeHtmlEmail(item.ccbDecisionAverageScore == null ? "N/A" : Number(item.ccbDecisionAverageScore).toFixed(2))}</span>
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#F1F5F9;color:#475569;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(trackingData.status || "Open")}</span>
-                </div>
-                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-family:${sansStack};font-size:14px;color:#334155;">
-                  <tr><td style="padding:4px 0;"><strong>Owner</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(item.ownerName || "Not specified")}</td></tr>
-                  <tr><td style="padding:4px 0;"><strong>Impacted Areas</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(impactedAreaNames.join(", ") || "Not specified")}</td></tr>
-                  <tr><td style="padding:4px 0;"><strong>Date Created</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatEmailDateOnly(trackingData.dateCreated))}</td></tr>
-                  <tr><td style="padding:4px 0;"><strong>Due Date</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatEmailDateOnly(trackingData.dueDate))}</td></tr>
-                  <tr><td style="padding:4px 0;"><strong>Jira Ticket</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.jiraTicketsRelated))}</td></tr>
-                  <tr><td style="padding:4px 0;"><strong>Git Repository</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.gitRepository))}</td></tr>
-                  <tr><td style="padding:4px 0;"><strong>Branch / Stream</strong></td><td style="padding:4px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.branchLocation))}</td></tr>
-                </table>
-              </td>
-            </tr>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-family:${sansStack};font-size:14px;line-height:1.55;color:#334155;">
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Owner</td><td style="padding:3px 0;">${escapeHtmlEmail(item.ownerName || "Not specified")}</td></tr>
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Impacted Areas</td><td style="padding:3px 0;">${escapeHtmlEmail(impactedAreaNames.join(", ") || "Not specified")}</td></tr>
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Date Created</td><td style="padding:3px 0;">${escapeHtmlEmail(formatEmailDateOnly(trackingData.dateCreated))}</td></tr>
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Due Date</td><td style="padding:3px 0;">${escapeHtmlEmail(formatEmailDateOnly(trackingData.dueDate))}</td></tr>
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Jira Ticket</td><td style="padding:3px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.jiraTicketsRelated))}</td></tr>
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Git Repository</td><td style="padding:3px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.gitRepository))}</td></tr>
+            <tr><td style="padding:3px 0;width:140px;color:#6B7280;">Branch / Stream</td><td style="padding:3px 0;">${escapeHtmlEmail(formatImplementationFieldValue(trackingData.branchLocation))}</td></tr>
+            ${String(trackingData.comments || "").trim() ? `<tr><td style="padding:3px 0;width:140px;color:#6B7280;">Comments</td><td style="padding:3px 0;">${escapeHtmlEmail(trackingData.comments)}</td></tr>` : ""}
+            ${String(trackingData.implementationNotes || "").trim() ? `<tr><td style="padding:3px 0;width:140px;color:#6B7280;">Implementation Notes</td><td style="padding:3px 0;">${escapeHtmlEmail(trackingData.implementationNotes)}</td></tr>` : ""}
           </table>
-
-          <a href="${escapeHtmlEmail(ticketLink)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;">
-            Review open item
-          </a>
-          <div style="font-family:${sansStack};font-size:13px;line-height:1.7;color:#64748B;margin-top:14px;">
-            Fallback link: <a href="${escapeHtmlEmail(ticketLink)}" style="color:#0F2836;">${escapeHtmlEmail(ticketLink)}</a>
-          </div>
-          ${PRESESSION_EMAIL_OVERRIDE ? `<div style="font-family:${sansStack};font-size:12px;line-height:1.7;color:#64748B;margin-top:16px;">Debug mode: original intended recipient was ${escapeHtmlEmail(intendedRecipient || "Not available")}.</div>` : ""}
         </td>
       </tr>
-    </table>
-  </body>
-</html>`;
+    </table>`;
+  return renderEmailShell({
+    title: "Open Item Assigned for Implementation",
+    eyebrow: "Implementation Tracking",
+    introHtml,
+    bodyHtml,
+    ctaHref: ticketLink,
+    ctaLabel: "Review Open Item",
+    footerHtml: emailDelivery.footerHtml || "",
+  });
 }
 
-function buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient = "") {
+function buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, owner, ticketLink, emailDelivery = {}) {
+  const intendedRecipient = emailDelivery.intendedRecipient || "";
   const ownerName = owner?.name || item.ownerName || intendedRecipient || "Owner";
   const sansStack = "Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif";
   const changeRows = changes.map((change) => {
@@ -2000,74 +2391,50 @@ function buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, o
     const afterValue = /date/i.test(change.label) ? formatEmailDateOnly(change.after) : formatImplementationFieldValue(change.after);
     return `
       <tr>
-        <td style="padding:14px 16px;border-top:1px solid #E2E8F0;">
-          <div style="font-family:${sansStack};font-size:13px;color:#64748B;margin-bottom:6px;">${escapeHtmlEmail(change.label)}</div>
+        <td style="padding:10px 0;border-top:1px solid #EEF2F6;">
+          <div style="font-family:${sansStack};font-size:12px;color:#6B7280;margin-bottom:3px;">${escapeHtmlEmail(change.label)}</div>
           <div style="font-family:${sansStack};font-size:14px;color:#334155;">From: ${escapeHtmlEmail(beforeValue)}</div>
-          <div style="font-family:${sansStack};font-size:14px;color:#0F172A;font-weight:700;">To: ${escapeHtmlEmail(afterValue)}</div>
+          <div style="font-family:${sansStack};font-size:14px;color:#0F172A;font-weight:600;">To: ${escapeHtmlEmail(afterValue)}</div>
         </td>
       </tr>
     `;
   }).join("");
-
-  return `
-<!doctype html>
-<html lang="en">
-  <body style="margin:0;padding:24px;background:#FDFCF9;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;margin:0 auto;border:1px solid #E2E8F0;border-radius:24px;background:#FFFFFF;overflow:hidden;">
+  const introHtml = `Hello ${escapeHtmlEmail(ownerName)},<br/>The implementation tracking record for this CCB-approved Open Item was updated.`;
+  const bodyHtml = `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:6px;">
       <tr>
-        <td style="padding:26px 30px;border-bottom:1px solid #E2E8F0;">
-          <div style="font-family:Inter, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif;font-size:28px;line-height:1;color:#111827;font-weight:800;letter-spacing:-0.04em;">
-            conceiv<span style="color:#C88A2D;">able</span>
-            <span style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#475569;font-weight:600;vertical-align:middle;">Life Sciences</span>
+        <td style="padding:16px 16px;border:1px solid #EDF1F5;border-radius:14px;background:#FBFCFD;">
+          <div style="font-family:${sansStack};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#7A8798;margin-bottom:6px;">${escapeHtmlEmail(item.id)}</div>
+          <div style="font-family:${sansStack};font-size:22px;line-height:1.25;color:#0F172A;font-weight:700;margin-bottom:10px;">${escapeHtmlEmail(item.title)}</div>
+          <div style="margin-bottom:12px;">
+            <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#F3F4F6;color:#334155;font-family:${sansStack};font-size:11px;font-weight:600;margin-right:6px;">${escapeHtmlEmail(item.ccbDecisionRecommendation || "APPROVE")}</span>
+            <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#FFF7ED;color:#B86A1D;font-family:${sansStack};font-size:11px;font-weight:600;margin-right:6px;">Score ${escapeHtmlEmail(item.ccbDecisionAverageScore == null ? "N/A" : Number(item.ccbDecisionAverageScore).toFixed(2))}</span>
+            <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#F8FAFC;color:#475569;font-family:${sansStack};font-size:11px;font-weight:600;">${escapeHtmlEmail(formatImplementationFieldValue(afterTrackingData.status))}</span>
           </div>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:30px;">
-          <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#C88A2D;font-weight:800;margin-bottom:8px;">Implementation Tracking</div>
-          <div style="font-family:${sansStack};font-size:30px;line-height:1.1;color:#0F172A;font-weight:800;letter-spacing:-0.04em;margin-bottom:14px;">
-            Implementation Tracking Updated
-          </div>
-          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;margin-bottom:20px;">
-            Hello ${escapeHtmlEmail(ownerName)},<br/>
-            The implementation tracking record for this CCB-approved Open Item was updated.
-          </div>
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:18px;border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;overflow:hidden;">
-            <tr>
-              <td style="padding:20px 22px;border-bottom:1px solid #E2E8F0;">
-                <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748B;margin-bottom:8px;">${escapeHtmlEmail(item.id)}</div>
-                <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:800;letter-spacing:-0.03em;margin-bottom:10px;">${escapeHtmlEmail(item.title)}</div>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;">
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#EFF6FF;color:#0F2836;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(item.ccbDecisionRecommendation || "APPROVE")}</span>
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#FFF7ED;color:#C88A2D;font-family:${sansStack};font-size:12px;font-weight:700;">Score ${escapeHtmlEmail(item.ccbDecisionAverageScore == null ? "N/A" : Number(item.ccbDecisionAverageScore).toFixed(2))}</span>
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#F1F5F9;color:#475569;font-family:${sansStack};font-size:12px;font-weight:700;">${escapeHtmlEmail(formatImplementationFieldValue(afterTrackingData.status))}</span>
-                </div>
-              </td>
-            </tr>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;">
             ${changeRows}
           </table>
-
-          <a href="${escapeHtmlEmail(ticketLink)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;">
-            Review open item
-          </a>
-          <div style="font-family:${sansStack};font-size:13px;line-height:1.7;color:#64748B;margin-top:14px;">
-            Fallback link: <a href="${escapeHtmlEmail(ticketLink)}" style="color:#0F2836;">${escapeHtmlEmail(ticketLink)}</a>
-          </div>
-          ${PRESESSION_EMAIL_OVERRIDE ? `<div style="font-family:${sansStack};font-size:12px;line-height:1.7;color:#64748B;margin-top:16px;">Debug mode: original intended recipient was ${escapeHtmlEmail(intendedRecipient || "Not available")}.</div>` : ""}
         </td>
       </tr>
-    </table>
-  </body>
-</html>`;
+    </table>`;
+  return renderEmailShell({
+    title: "Implementation Tracking Updated",
+    eyebrow: "Implementation Tracking",
+    introHtml,
+    bodyHtml,
+    ctaHref: ticketLink,
+    ctaLabel: "Review Open Item",
+    footerHtml: emailDelivery.footerHtml || "",
+  });
 }
 
-function buildPreSessionEmailBody(group) {
+function buildPreSessionEmailBody(group, emailDelivery = {}) {
   const appUrl = buildAppDeepLink({ tab: "presession" });
   const lines = [
-    `Hola ${group.ownerName || group.ownerEmail},`,
+    `Hello ${group.ownerName || group.ownerEmail},`,
     "",
-    "Necesitamos tu revision de pre-sesion para los siguientes open items donde tu area aparece impactada.",
-    "Por favor entra a la app y marca si impacta o no impacta para tu area.",
+    "You have pending CCB pre-session reviews for the following Open Items where your area is impacted.",
+    "Open the app and confirm whether each Open Item impacts your area.",
     "",
     ...group.pendingItems.flatMap((item) => {
       const reviewUrl = buildAppDeepLink({
@@ -2076,13 +2443,17 @@ function buildPreSessionEmailBody(group) {
         areaId: item.areaId,
       });
       return [
-        `- ${item.openItemId} | ${item.title} | Area: ${item.areaName}${item.externalStatus ? ` | Estado: ${item.externalStatus}` : ""}`,
-        `  Revision directa: ${reviewUrl}`,
+        `- ${item.openItemId} | ${item.title} | Area: ${item.areaName}${item.externalStatus ? ` | Current CCB Status: ${item.externalStatus}` : ""}`,
+        `  Direct review: ${reviewUrl}`,
       ];
     }),
     "",
-    `Vista general: ${appUrl}`,
+    `Dashboard: ${appUrl}`,
   ];
+
+  if (emailDelivery.footerText) {
+    lines.push("", emailDelivery.footerText);
+  }
 
   return lines.join("\n");
 }
@@ -2096,7 +2467,7 @@ function escapeHtmlEmail(value) {
     .replace(/'/g, "&#39;");
 }
 
-function buildPreSessionEmailHtml(group) {
+function buildPreSessionEmailHtml(group, emailDelivery = {}) {
   const ownerName = group.ownerName || group.ownerEmail || "Owner";
   const dashboardUrl = buildAppDeepLink({ tab: "presession" });
   const introCount = `${group.pendingCount} open item${group.pendingCount === 1 ? "" : "s"}`;
@@ -2110,28 +2481,25 @@ function buildPreSessionEmailHtml(group) {
     });
     return `
       <tr>
-        <td style="padding:0 0 16px 0;">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;">
+        <td style="padding:0 0 10px 0;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #EDF1F5;border-radius:14px;background:#FBFCFD;">
             <tr>
-              <td style="padding:20px 22px;">
-                <div style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#64748B;margin-bottom:8px;">
+              <td style="padding:14px 16px;">
+                <div style="font-family:${sansStack};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#7A8798;margin-bottom:6px;">
                   ${escapeHtmlEmail(item.openItemId)} · ${escapeHtmlEmail(item.areaName)}
                 </div>
-                <div style="font-family:${sansStack};font-size:24px;line-height:1.2;color:#0F172A;font-weight:800;letter-spacing:-0.03em;margin-bottom:10px;">
+                <div style="font-family:${sansStack};font-size:18px;line-height:1.3;color:#0F172A;font-weight:700;margin-bottom:8px;">
                   ${escapeHtmlEmail(item.title)}
                 </div>
-                <div style="font-family:${sansStack};font-size:15px;line-height:1.6;color:#334155;margin-bottom:14px;">
-                  Tu area necesita confirmar si este open item te impacta o no.
-                  ${item.externalStatus ? `Estado CCB actual: <strong>${escapeHtmlEmail(item.externalStatus)}</strong>.` : ""}
+                <div style="font-family:${sansStack};font-size:14px;line-height:1.6;color:#334155;margin-bottom:10px;">
+                  Your area needs to confirm whether this Open Item impacts it.
+                  ${item.externalStatus ? `Current CCB Status: <strong>${escapeHtmlEmail(item.externalStatus)}</strong>.` : ""}
                 </div>
-                <div style="margin-bottom:14px;">
-                  <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#EFF6FF;color:#0369A1;font-family:${sansStack};font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">
+                <div>
+                  <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#F8FAFC;color:#475569;font-family:${sansStack};font-size:11px;font-weight:600;text-transform:uppercase;">
                     Area: ${escapeHtmlEmail(item.areaName)}
                   </span>
                 </div>
-                <a href="${escapeHtmlEmail(reviewUrl)}" style="display:inline-block;background:#0F2836;color:#FFFFFF;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;">
-                  Revisar open item
-                </a>
               </td>
             </tr>
           </table>
@@ -2140,58 +2508,32 @@ function buildPreSessionEmailHtml(group) {
     `;
   }).join("");
 
-  return `
-<!doctype html>
-<html lang="en">
-  <body style="margin:0;padding:24px;background:#FDFCF9;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;margin:0 auto;border:1px solid #E2E8F0;border-radius:24px;background:#FFFFFF;overflow:hidden;">
+  const introHtml = `Hello ${escapeHtmlEmail(ownerName)},<br/>Please review <strong>${escapeHtmlEmail(introCount)}</strong> and confirm whether each Open Item impacts your area.`;
+  const bodyHtml = `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:12px;">
       <tr>
-        <td style="padding:26px 30px;border-bottom:1px solid #E2E8F0;">
-          <div style="font-family:${sansStack};font-size:28px;line-height:1;color:#111827;font-weight:800;letter-spacing:-0.04em;">
-            conceiv<span style="color:#C88A2D;">able</span>
-            <span style="font-family:${sansStack};font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#475569;font-weight:600;vertical-align:middle;">Life Sciences</span>
-          </div>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:30px;">
-          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;">
-            Hello ${escapeHtmlEmail(ownerName)},
-          </div>
-          <div style="font-family:${sansStack};font-size:16px;line-height:1.7;color:#1E293B;margin-top:8px;">
-            It is now your turn to review <strong>${escapeHtmlEmail(introCount)}</strong> in CCB pre-session and confirm whether they impact your area.
-          </div>
-          <div style="font-family:${sansStack};font-size:15px;line-height:1.7;color:#475569;margin-top:8px;margin-bottom:24px;">
-            Open each item below and mark <strong>Si impacta</strong> or <strong>No impacta</strong>.
-          </div>
-
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:18px;">
-            <tr>
-              <td style="padding:18px 22px;border:1px solid #E2E8F0;border-radius:18px;background:#F8FAFC;">
-                <div style="font-family:${sansStack};font-size:14px;color:#64748B;margin-bottom:8px;">Pending areas</div>
-                <div style="font-family:${sansStack};font-size:22px;color:#0F172A;font-weight:800;letter-spacing:-0.03em;">${escapeHtmlEmail(group.areaNames.join(", "))}</div>
-              </td>
-            </tr>
-          </table>
-
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
-            ${itemCards}
-          </table>
-
-          <div style="padding-top:8px;">
-            <a href="${escapeHtmlEmail(dashboardUrl)}" style="display:inline-block;background:#FFFFFF;color:#0F2836;text-decoration:none;font-family:${sansStack};font-size:15px;font-weight:700;padding:12px 18px;border-radius:999px;border:1px solid #CBD5E1;">
-              Abrir vista general
-            </a>
-          </div>
-
-          <div style="font-family:${sansStack};font-size:14px;line-height:1.7;color:#64748B;margin-top:22px;">
-            When you open the link, CCB Collector will take you directly to the pre-session review tab and, when possible, focus the specific ticket for your area.
-          </div>
+        <td style="padding:14px 16px;border:1px solid #EDF1F5;border-radius:14px;background:#FBFCFD;">
+          <div style="font-family:${sansStack};font-size:12px;color:#6B7280;margin-bottom:6px;">Pending areas</div>
+          <div style="height:2px;background:linear-gradient(90deg,#EC9435,#F2D1A0);border-radius:999px;margin:0 0 10px 0;"></div>
+          <div style="font-family:${sansStack};font-size:16px;line-height:1.4;color:#0F172A;font-weight:600;">${escapeHtmlEmail(group.areaNames.join(", "))}</div>
         </td>
       </tr>
     </table>
-  </body>
-</html>`;
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+      ${itemCards}
+    </table>
+    <div style="font-family:${sansStack};font-size:13px;line-height:1.6;color:#6B7280;margin-top:8px;">
+      The link opens the pre-session review tab and, when possible, focuses the specific ticket for your area.
+    </div>`;
+  return renderEmailShell({
+    title: "Pre-Session Review Request",
+    eyebrow: "Impact Review",
+    introHtml,
+    bodyHtml,
+    ctaHref: dashboardUrl,
+    ctaLabel: "Review Open Item",
+    footerHtml: emailDelivery.footerHtml || "",
+  });
 }
 
 function toBase64Url(value) {
@@ -2204,32 +2546,74 @@ function toBase64Url(value) {
 
 async function sendGmailMessage({ to, subject, text, html = "" }) {
   if (getGoogleSheetsStorageMode() !== "user-oauth") {
-    throw new Error("El envio de correo requiere Google OAuth de usuario conectado.");
+    throw new Error("Email delivery requires a connected user Google OAuth session.");
   }
 
-  const boundary = `ccb_collector_${Date.now().toString(36)}`;
+  const mixedBoundary = `ccb_mixed_${Date.now().toString(36)}`;
+  const relatedBoundary = `ccb_related_${Date.now().toString(36)}`;
+  const alternativeBoundary = `ccb_alt_${Date.now().toString(36)}`;
   const url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
   const headers = await getGoogleRequestHeaders(url);
-  const rawMessage = [
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  const logoAttachment = getEmailLogoAttachment();
+  const attachments = logoAttachment ? [logoAttachment] : [];
+  console.log("[email-logo]", JSON.stringify({
+    to,
+    subject,
+    attachments: attachments.map((attachment) => ({
+      filename: attachment.filename,
+      cid: attachment.cid,
+      exists: fs.existsSync(attachment.path),
+    })),
+  }));
+
+  const messageLines = [
+    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
     "MIME-Version: 1.0",
     `To: ${to}`,
     `Subject: ${subject}`,
     "",
-    `--${boundary}`,
+    `--${mixedBoundary}`,
+    `Content-Type: multipart/related; boundary="${relatedBoundary}"`,
+    "",
+    `--${relatedBoundary}`,
+    `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`,
+    "",
+    `--${alternativeBoundary}`,
     "Content-Type: text/plain; charset=UTF-8",
     "Content-Transfer-Encoding: 7bit",
     "",
     text,
     "",
-    `--${boundary}`,
+    `--${alternativeBoundary}`,
     "Content-Type: text/html; charset=UTF-8",
     "Content-Transfer-Encoding: 7bit",
     "",
     html || `<pre>${escapeHtmlEmail(text)}</pre>`,
     "",
-    `--${boundary}--`,
-  ].join("\r\n");
+    `--${alternativeBoundary}--`,
+  ];
+
+  attachments.forEach((attachment) => {
+    const content = fs.readFileSync(attachment.path).toString("base64");
+    messageLines.push(
+      `--${relatedBoundary}`,
+      `Content-Type: ${attachment.contentType || "application/octet-stream"}; name="${attachment.filename}"`,
+      `Content-Disposition: inline; filename="${attachment.filename}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-ID: <${attachment.cid}>`,
+      "",
+      content,
+      "",
+    );
+  });
+
+  messageLines.push(
+    `--${relatedBoundary}--`,
+    "",
+    `--${mixedBoundary}--`,
+  );
+
+  const rawMessage = messageLines.join("\r\n");
 
   const response = await fetch(url, {
     method: "POST",
@@ -2265,45 +2649,80 @@ function getImplementationTrackingDataFromItem(item) {
 }
 
 async function sendImplementationAssignedEmail(item, trackingData, owner, ticketLink, state) {
-  const intendedRecipient = normalizeEmail(owner?.email || item.ownerEmail || "");
-  if (!intendedRecipient && !PRESESSION_EMAIL_OVERRIDE) {
-    return { status: "missing-owner-email" };
+  const intendedRecipient = normalizeEmail(owner?.email || "");
+  const emailDelivery = resolveNotificationRecipient(intendedRecipient);
+  if (!emailDelivery.ok) {
+    return {
+      status: emailDelivery.status,
+      attempted: true,
+      sent: false,
+      mode: emailDelivery.mode,
+      recipient: emailDelivery.deliveryTarget,
+      intendedRecipient,
+      ownerEmail: intendedRecipient,
+      deliveryTarget: emailDelivery.deliveryTarget,
+      reason: emailDelivery.error || "",
+      error: emailDelivery.error || "",
+    };
   }
-  const deliveryTarget = PRESESSION_EMAIL_OVERRIDE || intendedRecipient;
   await sendGmailMessage({
-    to: deliveryTarget,
+    to: emailDelivery.deliveryTarget,
     subject: buildImplementationAssignmentEmailSubject(item),
-    text: buildImplementationAssignedEmailBody(item, trackingData, owner, ticketLink, intendedRecipient, state),
-    html: buildImplementationAssignedEmailHtml(item, trackingData, owner, ticketLink, intendedRecipient, state),
+    text: buildImplementationAssignedEmailBody(item, trackingData, owner, ticketLink, emailDelivery, state),
+    html: buildImplementationAssignedEmailHtml(item, trackingData, owner, ticketLink, emailDelivery, state),
   });
   return {
-    status: PRESESSION_EMAIL_OVERRIDE ? "override-sent" : "sent",
+    status: emailDelivery.status,
+    attempted: true,
+    sent: true,
+    mode: emailDelivery.mode,
+    recipient: emailDelivery.deliveryTarget,
+    intendedRecipient,
     ownerEmail: intendedRecipient,
-    deliveryTarget,
+    deliveryTarget: emailDelivery.deliveryTarget,
+    reason: owner?.source || emailDelivery.mode,
   };
 }
 
 async function sendImplementationUpdatedEmail(item, beforeTrackingData, afterTrackingData, owner, ticketLink) {
   const changes = buildImplementationUpdateSummary(beforeTrackingData, afterTrackingData);
   if (!changes.length) {
-    return { status: "no-changes" };
+    return { status: "no-changes", attempted: true, sent: false, reason: "No tracking changes to notify." };
   }
-  const intendedRecipient = normalizeEmail(owner?.email || item.ownerEmail || "");
-  if (!intendedRecipient && !PRESESSION_EMAIL_OVERRIDE) {
-    return { status: "missing-owner-email", changes };
+  const intendedRecipient = normalizeEmail(owner?.email || "");
+  const emailDelivery = resolveNotificationRecipient(intendedRecipient);
+  if (!emailDelivery.ok) {
+    return {
+      status: emailDelivery.status,
+      attempted: true,
+      sent: false,
+      mode: emailDelivery.mode,
+      recipient: emailDelivery.deliveryTarget,
+      intendedRecipient,
+      ownerEmail: intendedRecipient,
+      deliveryTarget: emailDelivery.deliveryTarget,
+      changes,
+      reason: emailDelivery.error || "",
+      error: emailDelivery.error || "",
+    };
   }
-  const deliveryTarget = PRESESSION_EMAIL_OVERRIDE || intendedRecipient;
   await sendGmailMessage({
-    to: deliveryTarget,
+    to: emailDelivery.deliveryTarget,
     subject: buildImplementationUpdateEmailSubject(item),
-    text: buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient),
-    html: buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, owner, ticketLink, intendedRecipient),
+    text: buildImplementationUpdatedEmailBody(item, changes, afterTrackingData, owner, ticketLink, emailDelivery),
+    html: buildImplementationUpdatedEmailHtml(item, changes, afterTrackingData, owner, ticketLink, emailDelivery),
   });
   return {
-    status: PRESESSION_EMAIL_OVERRIDE ? "override-sent" : "sent",
+    status: emailDelivery.status,
+    attempted: true,
+    sent: true,
+    mode: emailDelivery.mode,
+    recipient: emailDelivery.deliveryTarget,
+    intendedRecipient,
     ownerEmail: intendedRecipient,
-    deliveryTarget,
+    deliveryTarget: emailDelivery.deliveryTarget,
     changes,
+    reason: owner?.source || emailDelivery.mode,
   };
 }
 
@@ -2329,15 +2748,16 @@ async function runPreSessionRequestJob(user) {
 
   for (const group of queue) {
     const subject = buildPreSessionEmailSubject(group);
-    const body = buildPreSessionEmailBody(group);
-    const htmlBody = buildPreSessionEmailHtml(group);
-    const deliveryTarget = PRESESSION_EMAIL_OVERRIDE || group.ownerEmail;
+    const emailDelivery = resolveNotificationRecipient(group.ownerEmail);
+    const body = buildPreSessionEmailBody(group, emailDelivery);
+    const htmlBody = buildPreSessionEmailHtml(group, emailDelivery);
+    const deliveryTarget = emailDelivery.deliveryTarget;
     let deliveryMode = "preview";
     let sent = false;
-    let errorMessage = "";
+    let errorMessage = emailDelivery.ok ? "" : (emailDelivery.error || "");
 
     try {
-      if (getGoogleSheetsStorageMode() === "user-oauth" && isUserGoogleOAuthConnected()) {
+      if (emailDelivery.ok && getGoogleSheetsStorageMode() === "user-oauth" && isUserGoogleOAuthConnected()) {
         await sendGmailMessage({
           to: deliveryTarget,
           subject,
@@ -2374,6 +2794,8 @@ async function runPreSessionRequestJob(user) {
       deliveryMode,
       sent,
       error: errorMessage,
+      recipientMode: emailDelivery.mode,
+      recipientStatus: emailDelivery.status,
       subject,
       body,
     });
@@ -2651,14 +3073,14 @@ function buildEmployeeDirectoryFromCsv(csvText, sourceName = "Imported employee 
   const headerIndex = rows.findIndex((row) => isEmployeeDirectoryHeaderRow(row));
 
   if (headerIndex === -1) {
-    throw new Error("No encontre la fila de encabezados del CSV de empleados.");
+    throw new Error("Could not find the employee CSV header row.");
   }
 
   const headerRow = rows[headerIndex];
   const bodyRows = rows.slice(headerIndex + 1);
   const emailIndex = findEmployeeEmailColumnIndex(headerRow);
   if (emailIndex === -1) {
-    throw new Error("No encontre una columna de correo real en el CSV. Debe existir una columna como Email o Email Address.");
+    throw new Error("Could not find a valid email column in the CSV. A column such as Email or Email Address is required.");
   }
 
   const contacts = [];
@@ -2781,7 +3203,7 @@ function findOpenItemHeaderRowIndex(values) {
 function getOpenItemSheetContext(values) {
   const headerRowIndex = findOpenItemHeaderRowIndex(values);
   if (headerRowIndex < 0 || !values[headerRowIndex]) {
-    throw new Error(`No se pudo detectar la fila de encabezados de ${SOURCE_SHEET_NAME}. Restaura la hoja para que vuelva a contener una fila con 'ID' y 'Open Item Description'.`);
+    throw new Error(`Could not detect the header row for ${SOURCE_SHEET_NAME}. Restore the sheet so it includes a row with 'ID' and 'Open Item Description'.`);
   }
 
   const headerRow = values[headerRowIndex].map((cell) => String(cell || "").trim());
@@ -2803,7 +3225,7 @@ function findDecisionHeaderRowIndex(values) {
 function getDecisionSheetContext(values) {
   const headerRowIndex = findDecisionHeaderRowIndex(values);
   if (headerRowIndex < 0 || !values[headerRowIndex]) {
-    throw new Error(`No se pudo detectar la tabla de ${CCB_DECISION_SHEET_NAME}. Debe existir una fila con 'OI_ID' y 'Open Item Description'.`);
+    throw new Error(`Could not detect the table for ${CCB_DECISION_SHEET_NAME}. A row with 'OI_ID' and 'Open Item Description' must exist.`);
   }
 
   const headerRow = values[headerRowIndex].map((cell) => String(cell || "").trim());
@@ -2934,12 +3356,12 @@ async function updateOpenItemImplementationTrackingSheetRow(openItemId, updates 
   const headerMap = buildImplementationTrackingHeaderMap(context.headerRow);
   const idColumnIndex = context.headerRow.findIndex((header) => String(header || "").trim() === "ID");
   if (idColumnIndex < 0) {
-    throw new Error("No encontramos la columna ID en Open Item List.");
+    throw new Error("Could not find the ID column in Open Item List.");
   }
 
   const rowIndex = context.bodyRows.findIndex((row) => String(row[idColumnIndex] || "").trim() === openItemId);
   if (rowIndex < 0) {
-    throw new Error("No encontramos la fila del Open Item en Open Item List.");
+    throw new Error("Could not find the Open Item row in Open Item List.");
   }
 
   const rowNumber = context.headerRowNumber + 1 + rowIndex;
@@ -3137,7 +3559,15 @@ async function saveImplementationTracking(openItemId, user, payload = {}) {
 
   const beforeTrackingData = getImplementationTrackingDataFromItem(item);
   const hadTracking = hasImplementationTracking(item);
-  const ownerContact = resolveImplementationOwnerContact(item, state);
+  const ownerResolution = resolveOwnerEmailForOpenItem(item, state);
+  const ownerContact = ownerResolution.email
+    ? {
+      name: ownerResolution.ownerName || item.ownerName || "",
+      email: ownerResolution.email,
+      source: ownerResolution.source,
+      debug: ownerResolution.debug,
+    }
+    : null;
   const ticketLink = buildTicketDeepLink(openItemId);
   const now = new Date().toISOString();
   const nextStatus = normalizeImplementationStatus(payload.status || item.implementationStatus || "Open") || "Open";
@@ -3205,11 +3635,31 @@ async function saveImplementationTracking(openItemId, user, payload = {}) {
   } catch (error) {
     notification = {
       status: "email-failed",
-      detail: error.message || "No se pudo enviar la notificacion.",
+      attempted: true,
+      sent: false,
+      mode: getEmailModeStatus().mode,
+      recipient: "",
+      intendedRecipient: ownerResolution.email || "",
+      reason: error.message || "Failed to send the notification.",
+      detail: error.message || "Failed to send the notification.",
     };
   }
 
+  if (!notification.reason && !notification.sent && !ownerResolution.email) {
+    notification.reason = `No owner email was found for ${ownerResolution.ownerName || item.ownerName || "the assigned owner"}.`;
+  }
+  notification.attempted = notification.attempted !== false;
+  notification.mode = notification.mode || getEmailModeStatus().mode;
+  notification.recipient = notification.recipient || notification.deliveryTarget || "";
+  notification.intendedRecipient = notification.intendedRecipient || ownerResolution.email || "";
+  notification.ownerName = ownerResolution.ownerName || item.ownerName || "";
+  notification.ownerResolution = {
+    email: ownerResolution.email || "",
+    source: ownerResolution.source || "",
+  };
+
   return {
+    saved: true,
     state: nextState,
     openItemId,
     implementationTrackingCreatedAt: item.implementationTrackingCreatedAt,
@@ -3724,7 +4174,7 @@ async function getGoogleRequestHeaders(url) {
       ? accessTokenResponse
       : accessTokenResponse?.token;
     if (!accessToken) {
-      throw new Error("No se pudo obtener access token de Google OAuth.");
+      throw new Error("Failed to obtain a Google OAuth access token.");
     }
     return {
       Authorization: `Bearer ${accessToken}`,
@@ -4888,9 +5338,13 @@ function sanitizeState(input) {
 
 function serveStatic(requestPath, response) {
   const targetPath = requestPath === "/" ? "/index.html" : requestPath;
-  const filePath = path.join(PUBLIC_DIR, path.normalize(targetPath));
+  const staticRoot = targetPath.startsWith("/logo/") ? LOGO_DIR : PUBLIC_DIR;
+  const relativeTarget = targetPath.startsWith("/logo/")
+    ? targetPath.replace(/^\/logo\//, "")
+    : targetPath;
+  const filePath = path.join(staticRoot, path.normalize(relativeTarget));
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  if (!filePath.startsWith(staticRoot)) {
     sendJson(response, 403, { error: "Forbidden" });
     return;
   }
@@ -4903,7 +5357,8 @@ function serveStatic(requestPath, response) {
   if (targetPath === "/index.html") {
     const html = fs
       .readFileSync(filePath, "utf8")
-      .replace(/__APP_BASE_PATH__/g, BASE_PATH);
+      .replace(/__APP_BASE_PATH__/g, BASE_PATH)
+      .replace(/__APP_LOGO_PATH__/g, getBrandLogoDocumentSrc());
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
     });
@@ -4920,7 +5375,7 @@ function serveStatic(requestPath, response) {
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
-  const pathname = stripBasePath(url.pathname);
+  const pathname = isGlobalLogoPath(url.pathname) ? url.pathname : stripBasePath(url.pathname);
 
   try {
     if (BASE_PATH && url.pathname === BASE_PATH) {
@@ -4942,13 +5397,13 @@ const server = http.createServer(async (request, response) => {
       }
 
       if (url.searchParams.get("error")) {
-        redirectToApp(response, "error", String(url.searchParams.get("error_description") || url.searchParams.get("error") || "Google rechazo la autorizacion."));
+        redirectToApp(response, "error", String(url.searchParams.get("error_description") || url.searchParams.get("error") || "Google authorization was rejected."));
         return;
       }
 
       const code = String(url.searchParams.get("code") || "");
       if (!code) {
-        redirectToApp(response, "error", "Google no devolvio codigo de autorizacion.");
+        redirectToApp(response, "error", "Google did not return an authorization code.");
         return;
       }
 
@@ -4980,6 +5435,28 @@ const server = http.createServer(async (request, response) => {
         appBaseUrl: authConfig.appBaseUrl || withBasePath(""),
         user: getCurrentUser(request),
         googleSheetsAuth: getGoogleSheetsAuthStatus(),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/email-mode") {
+      sendJson(response, 200, getEmailModeStatus());
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/email-mode") {
+      const user = getCurrentUser(request);
+      if (!isAdminUser(user)) {
+        sendJson(response, 403, { error: "Not authorized" });
+        return;
+      }
+      const body = await parseBody(request);
+      const requestedMode = normalizeEmailMode(body.mode);
+      const savedConfig = persistEmailModeConfig({ mode: requestedMode }, user);
+      sendJson(response, 200, {
+        ...getEmailModeStatus(),
+        updatedAt: savedConfig.updatedAt,
+        updatedBy: savedConfig.updatedBy,
       });
       return;
     }
@@ -5092,7 +5569,7 @@ const server = http.createServer(async (request, response) => {
       if (!ownedAreas.has(areaId)) {
         sendJson(response, 403, {
           error: "Forbidden",
-          detail: "Solo el owner del area puede responder esta revision.",
+          detail: "Only the area owner can respond to this review.",
         });
         return;
       }
@@ -5103,7 +5580,7 @@ const server = http.createServer(async (request, response) => {
       if (!item || (!targetAreaIds.has(areaId) && !hasExistingCheck)) {
         sendJson(response, 404, {
           error: "Not found",
-          detail: "No encontre ese open item impactando el area indicada.",
+          detail: "That Open Item was not found for the specified impacted area.",
         });
         return;
       }
@@ -5286,5 +5763,5 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, () => {
   ensureStateFile();
   restartLiveSyncScheduler();
-  console.log(`CCB Collector running on http://localhost:${PORT}${withBasePath("/")}`);
+  console.log(`Conceivable CCB running on http://localhost:${PORT}${withBasePath("/")}`);
 });
